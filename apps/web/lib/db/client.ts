@@ -42,6 +42,12 @@ function makeClient() {
 
 // Proxy that defers client construction to first access. `db.<anything>`
 // triggers the real Drizzle method only when called at request time.
+//
+// `execute` is intercepted to unwrap `.rows` so callers can keep doing
+// `const [row] = await db.execute(sql\`...\`)` exactly like they did with
+// postgres-js. Without this shim, neon-http's `FullQueryResults`
+// (`{ rows, rowCount, ... }`) wouldn't be array-destructurable and every
+// `db.execute` callsite in the codebase would silently break.
 export const db: ReturnType<typeof drizzle<typeof schema>> = new Proxy(
   {} as ReturnType<typeof drizzle<typeof schema>>,
   {
@@ -51,7 +57,22 @@ export const db: ReturnType<typeof drizzle<typeof schema>> = new Proxy(
         unknown
       >;
       const v = real[prop];
-      return typeof v === 'function' ? (v as (...a: unknown[]) => unknown).bind(real) : v;
+      if (typeof v !== 'function') return v;
+      const bound = (v as (...a: unknown[]) => unknown).bind(real);
+      if (prop === 'execute') {
+        return (...args: unknown[]) => {
+          const out = bound(...args) as Promise<unknown> | unknown;
+          if (out && typeof (out as Promise<unknown>).then === 'function') {
+            return (out as Promise<{ rows?: unknown[] } | unknown[]>).then((r) =>
+              r && typeof r === 'object' && !Array.isArray(r) && 'rows' in (r as object)
+                ? (r as { rows: unknown[] }).rows
+                : r,
+            );
+          }
+          return out;
+        };
+      }
+      return bound;
     },
   },
 );

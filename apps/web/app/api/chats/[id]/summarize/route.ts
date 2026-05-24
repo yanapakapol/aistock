@@ -103,7 +103,7 @@ export async function POST(
     `Open questions, Action items. Do NOT invent facts not in the transcript. Use clean markdown.\n\n` +
     `=== TRANSCRIPT ===\n${transcript}\n=== END ===`;
 
-  const model = clientFor(provider, modelId, apiKey);
+  const model = await clientFor(provider, modelId, apiKey);
   const out = await generateText({ model, prompt }).catch((err) => {
     throw err;
   });

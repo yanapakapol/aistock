@@ -200,7 +200,7 @@ export async function runRoutineOnce(routine: RoutineForRun): Promise<void> {
       }
 
       try {
-        const model = clientFor(provider, modelId, apiKey);
+        const model = await clientFor(provider, modelId, apiKey);
         const result = streamText({
           model,
           messages,

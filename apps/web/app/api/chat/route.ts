@@ -163,6 +163,19 @@ async function recordAttemptAudit(
 // ---------- Handler ----------
 
 export async function POST(req: NextRequest) {
+  // Tiny per-phase wall-clock log so production slowness becomes diagnosable
+  // from Vercel logs without having to attach a profiler. Each phase fires
+  // once per request; the cumulative time tells us which step is the actual
+  // hot-path dominator (cold-start bundle, DB warmup, LLM first-byte, etc.).
+  const t0 = Date.now();
+  let lastT = t0;
+  const phase = (name: string) => {
+    const now = Date.now();
+    // eslint-disable-next-line no-console
+    console.log(`[chat] +${now - lastT}ms / ${now - t0}ms total → ${name}`);
+    lastT = now;
+  };
+
   // CSRF: only allow same-origin browser calls.
   const sfs = req.headers.get('sec-fetch-site');
   if (sfs && sfs !== 'same-origin' && sfs !== 'none') {
@@ -188,6 +201,7 @@ export async function POST(req: NextRequest) {
   }>;
 
   const sessionUser = await sessionUserP;
+  phase('session loaded');
   if (!sessionUser) {
     return NextResponse.json({ error: 'unauthorized' }, { status: 401 });
   }
@@ -215,6 +229,7 @@ export async function POST(req: NextRequest) {
   });
 
   const [[userCaps], used, bodyJsonRaw] = await Promise.all([userCapsP, usedP, bodyJsonP]);
+  phase('caps + usage + body parsed');
   if (!userCaps) {
     // Session pointed at a now-deleted user. Treat as logged-out.
     return NextResponse.json({ error: 'unauthorized' }, { status: 401 });
@@ -601,6 +616,7 @@ export async function POST(req: NextRequest) {
     providerKeysP,
     registryP,
   ]);
+  phase('keys + registry resolved');
   const apiKeyByProvider = new Map<Provider, string>();
   const providersWithKeys: Provider[] = [];
   for (const { p, key } of providerKeyEntries) {
@@ -676,7 +692,8 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: sanitizeError(e) }, { status: lastStatus });
     }
 
-    const model = clientFor(attempt.provider, attempt.modelId, apiKey);
+    const model = await clientFor(attempt.provider, attempt.modelId, apiKey);
+    phase(`clientFor(${attempt.provider}) loaded`);
     const attemptProvider = attempt.provider;
     const attemptModelId = attempt.modelId;
 
@@ -688,6 +705,7 @@ export async function POST(req: NextRequest) {
     try {
       // convertToModelMessages is async in this SDK version — must await.
       const modelMessages = (await convertToModelMessages(messages as never)) as ModelMessage[];
+      phase('messages converted, calling streamText');
       result = streamText({
         model,
         system: systemPreamble,
@@ -837,6 +855,7 @@ export async function POST(req: NextRequest) {
     // hand the body to the client. Note we audit BEFORE returning so the
     // row's latency reflects "time to first byte", not the full stream.
     void recordAttemptAudit(attempt.provider, 200, Date.now() - start);
+    phase('streamText returned — handing off');
     // v6 messageMetadata signature is `({part}) => unknown` and only emits when
     // the return value is defined. Emit on the finish part only.
     return result.toUIMessageStreamResponse({
