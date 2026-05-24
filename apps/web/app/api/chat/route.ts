@@ -596,7 +596,7 @@ export async function POST(req: NextRequest) {
   // navigates away or hits stop). The AI SDK passes our abort signal through
   // to the model; we hook it here so the partial transcript still lands.
   req.signal?.addEventListener('abort', () => {
-    void persistAssistant('abort');
+    persistAssistant('abort').catch(() => undefined);
   });
 
   // Build attempt chain — primary + explicit fallbacks, then auto-rescue with
@@ -678,7 +678,7 @@ export async function POST(req: NextRequest) {
     if (!apiKey) {
       lastStatus = 400;
       lastError = new Error(`no api key saved for ${attempt.provider}`);
-      void recordAttemptAudit(attempt.provider, lastStatus, Date.now() - start);
+      recordAttemptAudit(attempt.provider, lastStatus, Date.now() - start).catch(() => undefined);
       // Different provider next in the chain → continue. If this was the
       // primary and no fallbacks were provided, fall through to the 400.
       if (!isLast) continue;
@@ -691,7 +691,7 @@ export async function POST(req: NextRequest) {
     } catch (e) {
       lastStatus = 429;
       lastError = e;
-      void recordAttemptAudit(attempt.provider, lastStatus, Date.now() - start);
+      recordAttemptAudit(attempt.provider, lastStatus, Date.now() - start).catch(() => undefined);
       // Budget is per-provider; the next chain entry is a different
       // provider with its own bucket, so try it.
       if (!isLast) continue;
@@ -852,7 +852,7 @@ export async function POST(req: NextRequest) {
       const status = statusFromError(e);
       lastStatus = status;
       lastError = e;
-      void recordAttemptAudit(attempt.provider, status, Date.now() - start);
+      recordAttemptAudit(attempt.provider, status, Date.now() - start).catch(() => undefined);
       if (!isLast && isRetriableStartError(e)) continue;
       return NextResponse.json({ error: sanitizeError(e) }, { status: status || 500 });
     }
@@ -860,7 +860,7 @@ export async function POST(req: NextRequest) {
     // streamText returned without throwing — commit. Audit success and
     // hand the body to the client. Note we audit BEFORE returning so the
     // row's latency reflects "time to first byte", not the full stream.
-    void recordAttemptAudit(attempt.provider, 200, Date.now() - start);
+    recordAttemptAudit(attempt.provider, 200, Date.now() - start).catch(() => undefined);
     phase('streamText returned — handing off');
     // v6 messageMetadata signature is `({part}) => unknown` and only emits when
     // the return value is defined. Emit on the finish part only.
