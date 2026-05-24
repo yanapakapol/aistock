@@ -3,7 +3,7 @@ import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { cookies } from 'next/headers';
 import { db } from '@/lib/db/client';
 import { users } from '@/lib/db/schema';
-import { eq } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
 
 const COOKIE = 'aistock_session';
 const MAX_AGE = 60 * 60 * 24 * 30; // 30 days
@@ -80,12 +80,31 @@ export async function getSession(): Promise<SessionPayload | null> {
 export async function getCurrentUser() {
   const s = await getSession();
   if (!s) return null;
-  const [row] = await db
-    .select({ id: users.id, username: users.username, isAdmin: users.isAdmin })
-    .from(users)
-    .where(eq(users.id, s.uid))
-    .limit(1);
-  return row ?? null;
+  // Try to read role too (column added in a later migration). Wrap in
+  // try/catch so an un-migrated DB still returns the legacy fields.
+  try {
+    const [row] = (await db.execute(sql`
+      select id, username, is_admin as "isAdmin",
+             coalesce(role::text, case when is_admin then 'admin' else 'user' end) as role
+      from users where id = ${s.uid} limit 1
+    `)) as unknown as Array<{
+      id: number;
+      username: string;
+      isAdmin: boolean;
+      role: 'admin' | 'user' | 'guest';
+    }>;
+    return row ?? null;
+  } catch {
+    // Fallback to legacy select if the role column truly doesn't exist
+    // (shouldn't happen post-ensureSchema, but cheap belt-and-braces).
+    const [row] = await db
+      .select({ id: users.id, username: users.username, isAdmin: users.isAdmin })
+      .from(users)
+      .where(eq(users.id, s.uid))
+      .limit(1);
+    if (!row) return null;
+    return { ...row, role: row.isAdmin ? ('admin' as const) : ('user' as const) };
+  }
 }
 
 export async function requireUser() {

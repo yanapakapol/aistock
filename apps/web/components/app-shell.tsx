@@ -38,7 +38,11 @@ const adminNav = [
 export function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const [menuOpen, setMenuOpen] = useState(false);
-  const [me, setMe] = useState<{ username: string; isAdmin: boolean } | null>(null);
+  const [me, setMe] = useState<{
+    username: string;
+    isAdmin: boolean;
+    role?: 'admin' | 'user' | 'guest';
+  } | null>(null);
   // Fire ONCE on mount — not on every pathname change. The response carries
   // Cache-Control: private, max-age=300, so logout/login changes are picked up
   // within 5 min anyway (and logout/login itself hard-navigates). Cuts one DB
@@ -46,7 +50,11 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     fetch('/api/auth/me')
       .then((r) => r.json())
-      .then((j: { user?: { username: string; isAdmin: boolean } | null }) => setMe(j.user ?? null))
+      .then(
+        (j: {
+          user?: { username: string; isAdmin: boolean; role?: 'admin' | 'user' | 'guest' } | null;
+        }) => setMe(j.user ?? null),
+      )
       .catch(() => undefined);
   }, []);
   async function logout() {
@@ -127,9 +135,27 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           <div className="mt-auto border-t border-border pt-3">
             <div className="flex items-center justify-between px-2 text-xs">
               <div className="min-w-0">
-                <div className="truncate font-medium text-foreground">{me.username}</div>
+                <div className="flex items-center gap-1.5">
+                  <span className="truncate font-medium text-foreground">{me.username}</span>
+                  <span
+                    className={cn(
+                      'shrink-0 rounded px-1 py-0 text-[9px] font-medium uppercase tracking-wide',
+                      me.role === 'admin'
+                        ? 'bg-foreground/10 text-foreground'
+                        : me.role === 'guest'
+                          ? 'bg-yellow-500/20 text-yellow-700 dark:text-yellow-400'
+                          : 'bg-muted text-muted-foreground',
+                    )}
+                  >
+                    {me.role ?? (me.isAdmin ? 'admin' : 'user')}
+                  </span>
+                </div>
                 <div className="text-[10px] text-muted-foreground">
-                  {me.isAdmin ? 'admin · uses env keys' : 'user · own keys only'}
+                  {me.isAdmin
+                    ? 'uses env keys'
+                    : me.role === 'guest'
+                      ? "uses admin's keys · data wiped weekly"
+                      : 'own keys only'}
                 </div>
               </div>
               <button
