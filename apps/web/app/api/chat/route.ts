@@ -456,11 +456,54 @@ export async function POST(req: NextRequest) {
     void persistAssistant('abort');
   });
 
-  // Ordered attempt chain, capped at MAX_ATTEMPTS total.
-  const chain: Array<{ provider: Provider; modelId: string }> = [
+  // Build attempt chain — primary + explicit fallbacks, then auto-rescue with
+  // ANY other provider that has a saved key so the user never gets
+  // "Invalid model" just because their localStorage default points at a
+  // provider they never configured.
+  const rawChain: Array<{ provider: Provider; modelId: string }> = [
     { provider, modelId },
     ...(fallbackModels ?? []),
-  ].slice(0, MAX_ATTEMPTS);
+  ];
+
+  // Discover every provider with a saved key (so we can auto-fill the chain).
+  const providersWithKeys: Provider[] = [];
+  for (const p of PROVIDERS) {
+    const k = await loadApiKey(p);
+    if (k) providersWithKeys.push(p);
+  }
+
+  // Pull each provider's default model from the fallback registry.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const registry: Record<string, { models?: Array<{ id: string }> }> = (
+    (await import('@/lib/llm/models.json', { with: { type: 'json' } })) as unknown as { default: Record<string, { models?: Array<{ id: string }> }> }
+  ).default;
+
+  // Append every key-having provider's first model, deduped against the chain.
+  const seen = new Set(rawChain.map((e) => `${e.provider}/${e.modelId}`));
+  for (const p of providersWithKeys) {
+    const def = registry[p]?.models?.[0]?.id;
+    if (!def) continue;
+    const key = `${p}/${def}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    rawChain.push({ provider: p, modelId: def });
+  }
+  // Auto-rescue: drop entries whose provider has no key so we don't waste
+  // attempts on definite 400s.
+  const chain = rawChain
+    .filter((e) => providersWithKeys.includes(e.provider))
+    .slice(0, MAX_ATTEMPTS);
+  if (chain.length === 0) {
+    return NextResponse.json(
+      {
+        error: {
+          message:
+            'No usable LLM provider — add at least one API key in Settings (OpenAI, Anthropic, Google, Mistral, Moonshot, or DeepSeek).',
+        },
+      },
+      { status: 400 },
+    );
+  }
 
   const usdCap = effectiveUsd;
   let lastError: unknown = null;

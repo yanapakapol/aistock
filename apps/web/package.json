@@ -38,6 +38,7 @@
     "tavily": "^2.0.0",
     "exa-js": "^2.13.0",
     "web-push": "^3.6.7",
+    "bcryptjs": "^3.0.3",
     "dotenv": "^16.4.7",
     "server-only": "^0.0.1",
     "tailwindcss": "^3.4.17",

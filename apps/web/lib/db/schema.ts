@@ -66,10 +66,29 @@ export const routineStatusEnum = pgEnum('routine_status', [
 ]);
 export const messageRoleEnum = pgEnum('message_role', ['user', 'assistant', 'system', 'tool']);
 
+// ---------- Auth / users ----------
+
+export const users = pgTable(
+  'users',
+  {
+    id: serial('id').primaryKey(),
+    username: text('username').notNull(),
+    passwordHash: text('password_hash').notNull(),
+    isAdmin: boolean('is_admin').notNull().default(false),
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => ({
+    byUsername: uniqueIndex('users_username_uq').on(t.username),
+  }),
+);
+
 // ---------- Portfolio ----------
 
 export const portfolios = pgTable('portfolios', {
   id: serial('id').primaryKey(),
+  // user_id is added via migrate.ts ALTER TABLE for backward-compat (existing
+  // rows get owned by the first user). New deployments enforce NOT NULL via FK.
+  userId: integer('user_id').references(() => users.id, { onDelete: 'cascade' }),
   name: text('name').notNull(),
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
 });
@@ -332,6 +351,7 @@ export const apiKeys = pgTable(
   'api_keys',
   {
     id: serial('id').primaryKey(),
+    userId: integer('user_id').references(() => users.id, { onDelete: 'cascade' }),
     provider: text('provider').notNull(),
     kid: integer('kid').notNull().default(1),
     ciphertext: bytea('ciphertext').notNull(),
@@ -344,7 +364,7 @@ export const apiKeys = pgTable(
     lastUsedAt: timestamp('last_used_at', { withTimezone: true }),
   },
   (t) => ({
-    byProvider: uniqueIndex('api_keys_provider_uq').on(t.provider),
+    byUserProvider: uniqueIndex('api_keys_user_provider_uq').on(t.userId, t.provider),
   }),
 );
 

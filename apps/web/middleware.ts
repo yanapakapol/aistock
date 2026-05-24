@@ -9,6 +9,29 @@ const RATE_LIMIT_BUCKET_MAX = RATE_LIMIT_RPM;
 const REMOTE_BEARER_EXEMPT = ['/setup', '/api/setup', '/api/push/vapid-public-key'];
 const BEARER_COOKIE = 'aistock_bearer';
 
+// Paths exempt from the username/password auth gate (login/register itself,
+// session-check, static assets, etc.).
+const AUTH_FREE_PATHS = new Set([
+  '/login',
+  '/register',
+  '/api/auth/login',
+  '/api/auth/register',
+  '/api/auth/me',
+  '/api/auth/logout',
+  '/setup',
+  '/api/setup',
+  '/api/push/vapid-public-key',
+  '/manifest.webmanifest',
+  '/sw.js',
+]);
+
+function authFree(pathname: string): boolean {
+  if (AUTH_FREE_PATHS.has(pathname)) return true;
+  if (pathname.startsWith('/_next/')) return true;
+  if (pathname.startsWith('/icon-')) return true;
+  return false;
+}
+
 // ─── Rate limiter ──────────────────────────────────────────────────────────
 type Bucket = { tokens: number; lastRefillTs: number };
 const globalForRl = globalThis as unknown as { __aistockRateBuckets?: Map<string, Bucket> };
@@ -128,6 +151,23 @@ export async function middleware(req: NextRequest) {
       status: 429,
       headers: { 'Retry-After': '60' },
     });
+  }
+
+  // ─── Auth gate ────────────────────────────────────────────────────────────
+  // Block any non-auth-free page or API call without a session cookie.
+  // The cookie HMAC is verified server-side in route handlers via getSession();
+  // here we only check for presence to redirect early on full-page nav.
+  if (!authFree(pathname)) {
+    const session = req.cookies.get('aistock_session')?.value;
+    if (!session) {
+      if (pathname.startsWith('/api/')) {
+        return new NextResponse('unauthorized', { status: 401 });
+      }
+      const url = req.nextUrl.clone();
+      url.pathname = '/login';
+      url.search = `?next=${encodeURIComponent(pathname)}`;
+      return NextResponse.redirect(url);
+    }
   }
 
   if (isRemoteAccessMode() && !isExemptPath(pathname)) {

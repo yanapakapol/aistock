@@ -68,6 +68,21 @@ async function main() {
   // Add `parts jsonb` to chat_messages (post-init schema bump). Idempotent.
   await sql`ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS parts jsonb`;
 
+  // ---- Auth schema bumps ----
+  await sql`CREATE TABLE IF NOT EXISTS users (
+    id serial PRIMARY KEY,
+    username text NOT NULL,
+    password_hash text NOT NULL,
+    is_admin boolean NOT NULL DEFAULT false,
+    created_at timestamptz NOT NULL DEFAULT now()
+  )`;
+  await sql`CREATE UNIQUE INDEX IF NOT EXISTS users_username_uq ON users (username)`;
+  await sql`ALTER TABLE portfolios ADD COLUMN IF NOT EXISTS user_id integer REFERENCES users(id) ON DELETE CASCADE`;
+  await sql`ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS user_id integer REFERENCES users(id) ON DELETE CASCADE`;
+  // Drop the old single-key-per-provider unique and re-key on (user_id, provider).
+  await sql`DROP INDEX IF EXISTS api_keys_provider_uq`;
+  await sql`CREATE UNIQUE INDEX IF NOT EXISTS api_keys_user_provider_uq ON api_keys (user_id, provider)`;
+
   // chat_summaries — ad-hoc create so users don't need to re-run db:generate
   // when this table was added after the initial schema snapshot.
   await sql`CREATE TABLE IF NOT EXISTS chat_summaries (

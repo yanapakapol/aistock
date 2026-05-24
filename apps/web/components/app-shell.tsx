@@ -4,7 +4,7 @@ import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { useEffect, useState } from 'react';
 import { cn } from '@/lib/utils';
-import { Search, Sparkles, Clock, Wallet, Settings, Menu, X } from 'lucide-react';
+import { Search, Sparkles, Clock, Wallet, Settings, Menu, X, LogOut } from 'lucide-react';
 import { ThemeToggle } from '@/components/theme-toggle';
 
 const nav = [
@@ -18,6 +18,17 @@ const nav = [
 export function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const [menuOpen, setMenuOpen] = useState(false);
+  const [me, setMe] = useState<{ username: string; isAdmin: boolean } | null>(null);
+  useEffect(() => {
+    fetch('/api/auth/me')
+      .then((r) => r.json())
+      .then((j: { user?: { username: string; isAdmin: boolean } | null }) => setMe(j.user ?? null))
+      .catch(() => undefined);
+  }, [pathname]);
+  async function logout() {
+    await fetch('/api/auth/logout', { method: 'POST', headers: { 'content-type': 'application/json' } });
+    window.location.href = '/login';
+  }
 
   // Close the drawer on route change.
   useEffect(() => {
@@ -69,6 +80,26 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             );
           })}
         </nav>
+        {me ? (
+          <div className="mt-auto border-t border-border pt-3">
+            <div className="flex items-center justify-between px-2 text-xs">
+              <div className="min-w-0">
+                <div className="truncate font-medium text-foreground">{me.username}</div>
+                <div className="text-[10px] text-muted-foreground">
+                  {me.isAdmin ? 'admin · uses env keys' : 'user · own keys only'}
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={logout}
+                title="Log out"
+                className="rounded-md p-1 text-muted-foreground hover:bg-accent hover:text-foreground"
+              >
+                <LogOut className="h-3.5 w-3.5" />
+              </button>
+            </div>
+          </div>
+        ) : null}
       </aside>
 
       {/* Backdrop for mobile drawer */}
