@@ -5,6 +5,7 @@ import { db } from '@/lib/db/client';
 import { users } from '@/lib/db/schema';
 import { hashPassword } from '@/lib/auth/password';
 import { createSession } from '@/lib/auth/session';
+import { ensureSchema } from '@/lib/db/ensure-schema';
 
 export const runtime = 'nodejs';
 
@@ -24,6 +25,16 @@ const GUEST_TTL_DAYS = 7;
 export async function POST(req: NextRequest) {
   if (req.headers.get('sec-fetch-site') && req.headers.get('sec-fetch-site') !== 'same-origin') {
     return NextResponse.json({ error: 'cross-origin denied' }, { status: 403 });
+  }
+  // Self-heal the schema on first hit. Cheap after the first call (memoized).
+  try {
+    await ensureSchema();
+  } catch (err) {
+    const msg = (err as { message?: string })?.message ?? String(err);
+    return NextResponse.json(
+      { error: 'database schema bootstrap failed', detail: msg },
+      { status: 500 },
+    );
   }
   const parsed = Body.safeParse(await req.json().catch(() => null));
   if (!parsed.success) {

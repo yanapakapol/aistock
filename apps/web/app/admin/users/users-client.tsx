@@ -48,6 +48,8 @@ export function UsersClient({ initialUsers, currentUserId }: Props) {
 
   return (
     <div className="space-y-4">
+      <CreateUserCard onCreated={refresh} />
+      <CapRequestsCard onChanged={refresh} />
       <div className="overflow-x-auto rounded-md border border-border">
         <table className="w-full text-sm">
           <thead className="bg-muted/40 text-xs uppercase tracking-wide text-muted-foreground">
@@ -350,6 +352,240 @@ function AssignKeyModal({
           </Button>
         </div>
       </div>
+    </div>
+  );
+}
+
+// --- Create-guest card -----------------------------------------------------
+
+function CreateUserCard({ onCreated }: { onCreated: () => void }) {
+  const [open, setOpen] = useState(false);
+  const [username, setUsername] = useState('');
+  const [password, setPassword] = useState('');
+  const [role, setRole] = useState<'guest' | 'user'>('guest');
+  const [tokenCap, setTokenCap] = useState('50000');
+  const [usdCap, setUsdCap] = useState('0.50');
+  const [ttlDays, setTtlDays] = useState('7');
+  const [status, setStatus] = useState<Status>({ kind: 'idle' });
+
+  async function submit() {
+    setStatus({ kind: 'busy' });
+    const body: Record<string, unknown> = { username, password, role };
+    if (tokenCap.trim() !== '') body.daily_token_cap = Number(tokenCap);
+    if (usdCap.trim() !== '') body.daily_usd_cap = Number(usdCap);
+    if (role === 'guest' && ttlDays.trim() !== '') body.expires_in_days = Number(ttlDays);
+    const r = await fetch('/api/admin/users', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!r.ok) {
+      const j = (await r.json().catch(() => ({}))) as { error?: string; detail?: string };
+      setStatus({
+        kind: 'err',
+        msg: [j.error ?? `HTTP ${r.status}`, j.detail].filter(Boolean).join(' — '),
+      });
+      return;
+    }
+    setStatus({ kind: 'ok', msg: `created "${username}"` });
+    setUsername('');
+    setPassword('');
+    onCreated();
+  }
+
+  if (!open) {
+    return (
+      <div>
+        <Button variant="outline" size="sm" onClick={() => setOpen(true)}>
+          + Create user / guest
+        </Button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="rounded-md border border-border bg-muted/20 p-4 space-y-3">
+      <div className="flex items-center justify-between">
+        <h2 className="text-sm font-semibold">Create account</h2>
+        <button
+          type="button"
+          onClick={() => setOpen(false)}
+          className="text-xs text-muted-foreground hover:text-foreground"
+        >
+          Cancel
+        </button>
+      </div>
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 md:grid-cols-3">
+        <div className="space-y-1">
+          <label className="text-xs text-muted-foreground">Username</label>
+          <Input value={username} onChange={(e) => setUsername(e.target.value)} />
+        </div>
+        <div className="space-y-1">
+          <label className="text-xs text-muted-foreground">Password (≥8)</label>
+          <Input
+            type="password"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+          />
+        </div>
+        <div className="space-y-1">
+          <label className="text-xs text-muted-foreground">Role</label>
+          <Select value={role} onChange={(e) => setRole(e.target.value as 'guest' | 'user')}>
+            <option value="guest">guest (7d data TTL)</option>
+            <option value="user">user (no TTL)</option>
+          </Select>
+        </div>
+        <div className="space-y-1">
+          <label className="text-xs text-muted-foreground">Token cap / day</label>
+          <Input
+            inputMode="numeric"
+            placeholder="∞"
+            value={tokenCap}
+            onChange={(e) => setTokenCap(e.target.value)}
+          />
+        </div>
+        <div className="space-y-1">
+          <label className="text-xs text-muted-foreground">USD cap / day</label>
+          <Input
+            inputMode="decimal"
+            placeholder="∞"
+            value={usdCap}
+            onChange={(e) => setUsdCap(e.target.value)}
+          />
+        </div>
+        {role === 'guest' ? (
+          <div className="space-y-1">
+            <label className="text-xs text-muted-foreground">Data TTL (days)</label>
+            <Input
+              inputMode="numeric"
+              value={ttlDays}
+              onChange={(e) => setTtlDays(e.target.value)}
+            />
+          </div>
+        ) : null}
+      </div>
+      {status.kind === 'err' ? (
+        <div className="text-xs text-red-500">{status.msg}</div>
+      ) : status.kind === 'ok' ? (
+        <div className="text-xs text-green-500">{status.msg}</div>
+      ) : null}
+      <div className="flex items-center justify-end">
+        <Button
+          size="sm"
+          onClick={submit}
+          disabled={
+            !username || password.length < 8 || status.kind === 'busy'
+          }
+        >
+          {status.kind === 'busy' ? 'Creating…' : 'Create'}
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+// --- Cap-request inbox -----------------------------------------------------
+
+interface CapRequest {
+  id: number;
+  user_id: number;
+  username: string;
+  requested_token_cap: number | null;
+  requested_usd_cap: number | null;
+  reason: string | null;
+  created_at: string;
+  current_token_cap: number | null;
+  current_usd_cap: number | null;
+}
+
+function CapRequestsCard({ onChanged }: { onChanged: () => void }) {
+  const [reqs, setReqs] = useState<CapRequest[]>([]);
+  const [status, setStatus] = useState<Status>({ kind: 'idle' });
+
+  const refresh = useCallback(async () => {
+    const r = await fetch('/api/admin/cap-requests');
+    if (!r.ok) return;
+    const j = (await r.json()) as { requests: CapRequest[] };
+    setReqs(j.requests ?? []);
+  }, []);
+
+  useEffect(() => {
+    void refresh();
+  }, [refresh]);
+
+  async function decide(id: number, action: 'approve' | 'deny') {
+    setStatus({ kind: 'busy' });
+    const r = await fetch(`/api/admin/cap-requests/${id}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ action }),
+    });
+    if (!r.ok) {
+      const j = (await r.json().catch(() => ({}))) as { error?: string };
+      setStatus({ kind: 'err', msg: j.error ?? `HTTP ${r.status}` });
+      return;
+    }
+    setStatus({ kind: 'idle' });
+    await refresh();
+    onChanged();
+  }
+
+  if (reqs.length === 0) return null;
+
+  return (
+    <div className="rounded-md border border-blue-500/40 bg-blue-500/5 p-4 space-y-3">
+      <h2 className="text-sm font-semibold">
+        Pending cap-increase requests ({reqs.length})
+      </h2>
+      <ul className="space-y-2 text-sm">
+        {reqs.map((r) => (
+          <li
+            key={r.id}
+            className="flex flex-col gap-2 rounded border border-border bg-background/60 p-3 sm:flex-row sm:items-center sm:justify-between"
+          >
+            <div className="min-w-0 flex-1">
+              <div className="font-medium">{r.username}</div>
+              <div className="text-xs text-muted-foreground">
+                {r.requested_token_cap != null ? (
+                  <>tokens: {r.current_token_cap ?? '∞'} → {r.requested_token_cap.toLocaleString()}</>
+                ) : null}
+                {r.requested_token_cap != null && r.requested_usd_cap != null ? ' · ' : ''}
+                {r.requested_usd_cap != null ? (
+                  <>USD: ${r.current_usd_cap ?? '∞'} → ${r.requested_usd_cap.toFixed(4)}</>
+                ) : null}
+              </div>
+              {r.reason ? (
+                <div className="mt-1 text-xs italic text-muted-foreground">
+                  &ldquo;{r.reason}&rdquo;
+                </div>
+              ) : null}
+              <div className="mt-1 text-[10px] text-muted-foreground">
+                {new Date(r.created_at).toLocaleString()}
+              </div>
+            </div>
+            <div className="flex items-center gap-2">
+              <Button
+                size="sm"
+                onClick={() => decide(r.id, 'approve')}
+                disabled={status.kind === 'busy'}
+              >
+                Approve
+              </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => decide(r.id, 'deny')}
+                disabled={status.kind === 'busy'}
+              >
+                Deny
+              </Button>
+            </div>
+          </li>
+        ))}
+      </ul>
+      {status.kind === 'err' ? (
+        <div className="text-xs text-red-500">{status.msg}</div>
+      ) : null}
     </div>
   );
 }

@@ -7,6 +7,7 @@ import { cn } from '@/lib/utils';
 import { Search, Sparkles, Clock, Wallet, Settings, Menu, X, LogOut, Users } from 'lucide-react';
 import { ThemeToggle } from '@/components/theme-toggle';
 import { PrefetchLink } from '@/components/prefetch-link';
+import { CapRequestButton } from '@/components/cap-request-button';
 
 // Per-nav API endpoints to warm on hover. The page bundle is already
 // prefetched by Next; this prefetches the JSON payload the page mounts with,
@@ -139,6 +140,11 @@ export function AppShell({ children }: { children: React.ReactNode }) {
               >
                 <LogOut className="h-3.5 w-3.5" />
               </button>
+            </div>
+            {/* Cap-increase request shortcut for non-admins with a daily cap.
+                Hidden for admins and unlimited users by the component itself. */}
+            <div className="px-2">
+              <CapRequestButton />
             </div>
           </div>
         ) : null}

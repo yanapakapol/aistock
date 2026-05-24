@@ -34,9 +34,16 @@ export function GuestForm() {
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ username, password }),
       });
-      const j = (await r.json()) as { error?: string };
-      if (!r.ok) {
-        setErr(j.error ?? `HTTP ${r.status}`);
+      const j = (await r.json().catch(() => ({}))) as {
+        ok?: boolean;
+        error?: string;
+        detail?: string;
+      };
+      if (!r.ok || !j.ok) {
+        // Show server-side detail (e.g. "column does not exist") so the user
+        // can report something actionable instead of a generic failure.
+        const parts = [j.error ?? `HTTP ${r.status}`, j.detail].filter(Boolean);
+        setErr(parts.join(' — '));
         return;
       }
       router.replace(next as never);

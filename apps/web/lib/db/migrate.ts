@@ -123,6 +123,26 @@ async function main() {
   await sql`CREATE INDEX IF NOT EXISTS chat_summaries_chat_idx
             ON chat_summaries (chat_id, created_at)`;
 
+  // ---- Cap-increase requests (user→admin asks for more tokens) ----
+  await sql`DO $$ BEGIN
+    CREATE TYPE cap_request_status AS ENUM ('pending','approved','denied');
+  EXCEPTION WHEN duplicate_object THEN null; END $$;`;
+  await sql`CREATE TABLE IF NOT EXISTS cap_requests (
+    id serial PRIMARY KEY,
+    user_id integer NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    requested_token_cap integer,
+    requested_usd_cap numeric(8,4),
+    reason text,
+    status cap_request_status NOT NULL DEFAULT 'pending',
+    decided_by_id integer REFERENCES users(id) ON DELETE SET NULL,
+    decided_at timestamptz,
+    created_at timestamptz NOT NULL DEFAULT now()
+  )`;
+  await sql`CREATE INDEX IF NOT EXISTS cap_requests_status_created_idx
+            ON cap_requests (status, created_at DESC)`;
+  await sql`CREATE INDEX IF NOT EXISTS cap_requests_user_idx
+            ON cap_requests (user_id, created_at DESC)`;
+
   await sql.end();
   // eslint-disable-next-line no-console
   console.log('migrated');

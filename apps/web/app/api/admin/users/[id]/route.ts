@@ -4,6 +4,7 @@ import { eq, sql } from 'drizzle-orm';
 import { db } from '@/lib/db/client';
 import { users } from '@/lib/db/schema';
 import { getCurrentUser } from '@/lib/auth/session';
+import { ensureSchema } from '@/lib/db/ensure-schema';
 
 export const runtime = 'nodejs';
 
@@ -18,8 +19,11 @@ interface AdminCheckDeny {
 type AdminCheck = AdminCheckOk | AdminCheckDeny;
 
 async function requireAdmin(): Promise<AdminCheck> {
+  await ensureSchema().catch(() => undefined);
   const u = await getCurrentUser().catch(() => null);
   if (!u) return { ok: false, res: NextResponse.json({ error: 'unauthorized' }, { status: 401 }) };
+  // Legacy boolean column is the always-present source of truth.
+  if (u.isAdmin) return { ok: true, callerId: u.id };
   const [row] = (await db.execute(
     sql`select role from users where id = ${u.id} limit 1`,
   )) as unknown as Array<{ role: string }>;

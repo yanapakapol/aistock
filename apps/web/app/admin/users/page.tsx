@@ -2,6 +2,7 @@ import { redirect } from 'next/navigation';
 import { sql } from 'drizzle-orm';
 import { db } from '@/lib/db/client';
 import { getCurrentUser } from '@/lib/auth/session';
+import { ensureSchema } from '@/lib/db/ensure-schema';
 import { UsersClient, type AdminUserRow } from './users-client';
 
 export const dynamic = 'force-dynamic';
@@ -44,6 +45,8 @@ DATABASE_URL='<your neon url>' npm run -w apps/web db:migrate`}
 }
 
 export default async function AdminUsersPage() {
+  // Self-heal the schema before any query touches the new columns.
+  await ensureSchema().catch(() => undefined);
   const me = await getCurrentUser().catch(() => null);
   if (!me) redirect('/login');
 
