@@ -13,13 +13,14 @@ export async function GET(req: NextRequest) {
   if (!provider.success) return NextResponse.json({ error: 'bad provider' }, { status: 400 });
   const key = await loadApiKey(provider.data);
   const models = await listModels(provider.data, key ?? undefined);
-  // Cache hard on the browser: model list barely changes (24h TTL on server).
-  // stale-while-revalidate keeps the dropdown instant even on slow Neon resume.
+  // Model catalog is identical for every user (no key data, no per-user
+  // filtering) — `public` lets shared caches/CDN coalesce. 15min fresh +
+  // 24h SWR keeps the dropdown instant even on slow Neon resume.
   return NextResponse.json(
     { provider: provider.data, models },
     {
       headers: {
-        'Cache-Control': 'private, max-age=3600, stale-while-revalidate=86400',
+        'Cache-Control': 'public, max-age=900, stale-while-revalidate=86400',
       },
     },
   );

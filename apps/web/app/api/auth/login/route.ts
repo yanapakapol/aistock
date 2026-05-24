@@ -48,6 +48,9 @@ export async function POST(req: NextRequest) {
   if (!row || !ok) {
     return NextResponse.json({ error: 'invalid username or password' }, { status: 401 });
   }
-  await createSession({ uid: row.id, isAdmin: row.isAdmin });
+  const role: 'admin' | 'user' | 'guest' =
+    (row.role as 'admin' | 'user' | 'guest' | null | undefined) ??
+    (row.isAdmin ? 'admin' : 'user');
+  await createSession({ uid: row.id, isAdmin: row.isAdmin, role, username: row.username });
   return NextResponse.json({ ok: true, user: { id: row.id, username: row.username, isAdmin: row.isAdmin } });
 }

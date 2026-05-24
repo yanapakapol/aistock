@@ -16,9 +16,11 @@ import {
 export const runtime = 'nodejs';
 
 const SWR_HEADERS = {
-  // Cache portfolio listing for 5 min, allow up to 1 h stale while we revalidate.
-  // Watchlist barely changes mid-session. Per-user via the session cookie.
-  'Cache-Control': 'private, max-age=300, stale-while-revalidate=3600',
+  // Cache portfolio listing for 60s with 1h SWR. Aligns with the 60s
+  // `unstable_cache` revalidate on listStocks/listStocksFull so the
+  // browser doesn't hold a stale list longer than the server does.
+  // Per-user via the session cookie (`private`).
+  'Cache-Control': 'private, max-age=60, stale-while-revalidate=3600',
 };
 
 const AddBody = z.object({

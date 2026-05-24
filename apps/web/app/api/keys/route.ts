@@ -101,7 +101,17 @@ export async function GET() {
     ...adminLlm.map((provider) => ({ provider, inherited: true })),
   ];
 
-  return NextResponse.json({ llm, news, llmDetails });
+  // Short, per-user cache: guests inherit admin keys, so when the admin
+  // saves/deletes one the guest's UI should reflect it within ~30s fresh
+  // (with up to 5min SWR for instant paint while we revalidate).
+  return NextResponse.json(
+    { llm, news, llmDetails },
+    {
+      headers: {
+        'Cache-Control': 'private, max-age=30, stale-while-revalidate=300',
+      },
+    },
+  );
 }
 
 export async function POST(req: NextRequest) {

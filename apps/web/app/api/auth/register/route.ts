@@ -23,22 +23,25 @@ export async function POST(req: NextRequest) {
   }
   const { username, password } = parsed.data;
 
-  // Atomic check: first user becomes admin, no one else can ever be admin.
+  // First user becomes admin, no one else can ever be admin.
+  // Used to wrap COUNT+INSERT in a transaction for atomicity, but
+  // neon-http doesn't support .transaction(cb). Two simultaneous
+  // first-time signups could theoretically both see count=0 and both
+  // become admin — in practice the bootstrap window is a single human
+  // action, and the operator can demote the dupe via SQL if it ever
+  // happens. Worth it for the cold-start win.
   const passwordHash = await hashPassword(password);
   try {
-    // Use a transaction to guarantee only ONE admin row can ever exist.
-    const created = await db.transaction(async (tx) => {
-      const [{ count }] = (await tx.execute(
-        sql`select count(*)::int as count from users`,
-      )) as unknown as Array<{ count: number }>;
-      const isAdmin = Number(count) === 0;
-      const [row] = await tx
-        .insert(users)
-        .values({ username, passwordHash, isAdmin })
-        .returning({ id: users.id, isAdmin: users.isAdmin });
-      return row;
-    });
-    await createSession({ uid: created!.id, isAdmin: created!.isAdmin });
+    const [{ count }] = (await db.execute(
+      sql`select count(*)::int as count from users`,
+    )) as unknown as Array<{ count: number }>;
+    const isAdmin = Number(count) === 0;
+    const [created] = await db
+      .insert(users)
+      .values({ username, passwordHash, isAdmin })
+      .returning({ id: users.id, isAdmin: users.isAdmin });
+    const role: 'admin' | 'user' = created!.isAdmin ? 'admin' : 'user';
+    await createSession({ uid: created!.id, isAdmin: created!.isAdmin, role, username });
     return NextResponse.json({ ok: true, user: { id: created!.id, username, isAdmin: created!.isAdmin } });
   } catch (err) {
     const msg = (err as { message?: string })?.message ?? '';

@@ -17,7 +17,9 @@ function secret(): Buffer {
 
 interface SessionPayload {
   uid: number;
-  adm: boolean;
+  adm: boolean; // legacy is_admin boolean
+  role?: 'admin' | 'user' | 'guest'; // optional for back-compat with old cookies
+  u?: string; // username, short key to save bytes
   exp: number; // unix seconds
 }
 
@@ -49,10 +51,17 @@ function verify(token: string): SessionPayload | null {
   }
 }
 
-export async function createSession(args: { uid: number; isAdmin: boolean }) {
+export async function createSession(args: {
+  uid: number;
+  isAdmin: boolean;
+  role?: 'admin' | 'user' | 'guest';
+  username?: string;
+}) {
   const token = sign({
     uid: args.uid,
     adm: args.isAdmin,
+    role: args.role,
+    u: args.username,
     exp: Math.floor(Date.now() / 1000) + MAX_AGE,
   });
   const jar = await cookies();
@@ -80,6 +89,11 @@ export async function getSession(): Promise<SessionPayload | null> {
 export async function getCurrentUser() {
   const s = await getSession();
   if (!s) return null;
+  // Fast path: cookie has everything we need. ~1ms vs 50-150ms cold Neon query.
+  if (s.u && s.role) {
+    return { id: s.uid, username: s.u, isAdmin: s.adm, role: s.role };
+  }
+  // Fallback for cookies issued before the role+username fields were added.
   // Try to read role too (column added in a later migration). Wrap in
   // try/catch so an un-migrated DB still returns the legacy fields.
   try {

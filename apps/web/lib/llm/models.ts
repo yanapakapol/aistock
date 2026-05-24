@@ -74,17 +74,21 @@ const readCache = unstable_cache(
 
 async function writeCache(provider: Provider, models: ModelInfo[]) {
   try {
-    await db.transaction(async (tx) => {
-      await tx.delete(modelsCache).where(sql`provider = ${provider}`);
-      if (!models.length) return;
-      await tx.insert(modelsCache).values(
+    // Used to be a transaction (DELETE-then-INSERT), but neon-http doesn't
+    // support .transaction(cb). The tiny window between the two statements
+    // could leave the cache empty for a few ms — readCache silently
+    // degrades to the live fetch in that case, so the worst impact is one
+    // extra provider API hit while the new rows land.
+    await db.delete(modelsCache).where(sql`provider = ${provider}`);
+    if (models.length) {
+      await db.insert(modelsCache).values(
         models.map((m) => ({
           provider,
           modelId: m.id,
           payload: m as unknown as Record<string, unknown>,
         })),
       );
-    });
+    }
     // Bust the in-memory readCache so the next /api/models call sees the new
     // models immediately rather than waiting up to 60s for the unstable_cache
     // TTL.

@@ -10,11 +10,15 @@ import { db } from './client';
  * Every statement is guarded with `IF NOT EXISTS` / `DO $$ EXCEPTION ... $$`
  * blocks so re-running is a no-op.
  *
- * Uses the shared Drizzle/postgres-js pool from `lib/db/client.ts` rather
- * than opening a parallel connection — Vercel cold starts can hit Neon's
- * connection ceiling (~20 on free) when too many serverless instances spin
- * up at once, and a second pool was occasionally timing out on TLS while
- * the first request was still warming. Reusing the pool eliminates that.
+ * Uses the shared Drizzle/neon-http client from `lib/db/client.ts`. The
+ * HTTP driver makes every query a stateless HTTPS request through Neon's
+ * pooler, so there's no per-instance TCP connection to exhaust the free
+ * tier's ~20-connection ceiling — but it also means no .transaction(cb)
+ * and no useful SET (each statement is its own implicit txn over a fresh
+ * connection). The per-statement lock_timeout / statement_timeout wrapping
+ * that used to live in `runDDL` is gone; the Neon pooler enforces its own
+ * server-side query timeout, which is sufficient to keep a stuck DROP
+ * INDEX from hanging ensureSchema() forever.
  *
  * Module-scoped Promise dedupe so concurrent requests at cold start all
  * wait on a single attempt, not N parallel DDL runs.
@@ -23,22 +27,6 @@ import { db } from './client';
 declare global {
   // eslint-disable-next-line no-var
   var __schemaEnsured: Promise<void> | undefined;
-}
-
-/**
- * Per-statement helper that scopes each DDL to a short transaction with
- * its own lock_timeout / statement_timeout. Without this, a DROP INDEX
- * waiting on a leaked SHARE lock would hang forever and block every
- * route that awaits ensureSchema(). The wider ensureSchema() routine
- * already wraps the whole thing in try/catch around per-statement
- * failures so one stuck DDL doesn't poison the rest.
- */
-async function runDDL(stmt: ReturnType<typeof sql>): Promise<void> {
-  await db.transaction(async (tx) => {
-    await tx.execute(sql`SET LOCAL lock_timeout = '5s'`);
-    await tx.execute(sql`SET LOCAL statement_timeout = '15s'`);
-    await tx.execute(stmt);
-  });
 }
 
 async function runBumps(): Promise<void> {
@@ -100,22 +88,21 @@ async function runBumps(): Promise<void> {
   // shared all the cascaded events/business_context across users. Drop
   // it, replace with a per-portfolio composite.
   //
-  // Both wrapped so a transient lock contention (e.g. a long-running query
-  // holding stocks open) doesn't abort the whole bump. On lock_timeout we
-  // log and keep going; next request will retry.
-  // These two are the only DDL that might contend on a held lock (stocks
-  // is the busy table). Run them via runDDL so a stuck lock fails fast
-  // instead of hanging the whole route through ensureSchema(). Other DDL
-  // above runs on tables that nothing else touches at boot, so the extra
-  // transaction overhead isn't worth it for them.
+  // Both wrapped in try/catch so a transient lock contention (e.g. a
+  // long-running query holding stocks open) doesn't abort the whole bump
+  // — we just log and move on, and the next ensureSchema() call retries.
+  // Used to wrap each in a per-statement transaction with SET LOCAL
+  // lock_timeout/statement_timeout, but neon-http doesn't support
+  // transactions; the Neon pooler's server-side query timeout takes the
+  // role of the previous lock_timeout safety net.
   try {
-    await runDDL(sql`DROP INDEX IF EXISTS stocks_symbol_exchange_uq`);
+    await db.execute(sql`DROP INDEX IF EXISTS stocks_symbol_exchange_uq`);
   } catch (err) {
     // eslint-disable-next-line no-console
     console.warn('[ensureSchema] DROP stocks_symbol_exchange_uq skipped:', err);
   }
   try {
-    await runDDL(sql`
+    await db.execute(sql`
       CREATE UNIQUE INDEX IF NOT EXISTS stocks_portfolio_symbol_exchange_uq
       ON stocks (portfolio_id, symbol, exchange)
     `);
@@ -126,17 +113,42 @@ async function runBumps(): Promise<void> {
 }
 
 /**
- * Idempotent and concurrency-safe. Call from instrumentation.ts on boot and
- * from any route that touches the new columns — the second call is free
- * because the Promise is cached. A failure clears the memo so the next
- * request retries (e.g. transient DB unavailability at cold start).
+ * Trigger schema bumps in background. Safe to call many times — only one
+ * attempt runs per process; subsequent calls are no-ops.
+ *
+ * Returns IMMEDIATELY. The bumps run on the next event-loop tick. Callers
+ * that need to be sure the bumps completed (rare — usually only used in
+ * tests or scripted seed flows) can await `ensureSchemaSync()`.
+ *
+ * Rationale: existing route code does `await ensureSchema().catch(() => undefined)`.
+ * With this fire-and-forget behavior the `await` resolves immediately (no DB
+ * work blocks the request). The very first request after a cold start might
+ * race against the first bump, but every route already has defensive try/catch
+ * around its queries (e.g. `/admin/users` falls back if `role` column missing),
+ * so a transient miss is fine. By the time the second request lands, the bumps
+ * are usually done.
  */
 export function ensureSchema(): Promise<void> {
+  kickoff();
+  return Promise.resolve();
+}
+
+/**
+ * Awaitable variant — resolves once the in-flight (or freshly kicked off)
+ * bump run completes. Use from tests and scripted seed flows where you
+ * really do need the schema settled before continuing.
+ */
+export function ensureSchemaSync(): Promise<void> {
+  return kickoff();
+}
+
+function kickoff(): Promise<void> {
   if (!globalThis.__schemaEnsured) {
     globalThis.__schemaEnsured = runBumps().catch((err) => {
+      // Reset memo on failure so the next request retries.
       globalThis.__schemaEnsured = undefined;
       // eslint-disable-next-line no-console
-      console.error('[ensureSchema] failed:', err);
+      console.error('[ensureSchema] background bump failed:', err);
       throw err;
     });
   }

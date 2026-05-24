@@ -86,7 +86,12 @@ export async function POST(req: NextRequest) {
         expiresAt,
       })
       .returning({ id: users.id, isAdmin: users.isAdmin });
-    await createSession({ uid: created!.id, isAdmin: created!.isAdmin });
+    await createSession({
+      uid: created!.id,
+      isAdmin: created!.isAdmin,
+      role: 'guest',
+      username,
+    });
     return NextResponse.json({
       ok: true,
       user: {

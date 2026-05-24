@@ -9,13 +9,26 @@
  */
 export async function register(): Promise<void> {
   if (process.env.NEXT_RUNTIME !== 'nodejs') return;
-  // NOTE on schema self-heal: we deliberately do NOT call ensureSchema() here.
-  // instrumentation.ts is bundled separately and statically importing the DB
-  // client pulls `postgres`'s native `net`/`tls` requires into a webpack
-  // bundle that can't resolve them. Every API route that touches the new
-  // columns calls ensureSchema() lazily on its first hit — so the first
-  // request after a cold start does the bumps before any query runs. That
-  // gives us the same self-healing without the bundle hazard.
+
+  // Schema self-heal: kick off the bumps in the background so the first
+  // request after a cold start doesn't have to pay for them. Once the DB
+  // driver switches to `@neondatabase/serverless` (HTTP, no `net`/`tls`)
+  // this is safe to bundle into instrumentation. setImmediate keeps the
+  // boot path itself fast — the dynamic import + bump happens on the next
+  // tick.
+  try {
+    setImmediate(async () => {
+      try {
+        const { ensureSchemaSync } = await import('./lib/db/ensure-schema');
+        await ensureSchemaSync();
+      } catch (err) {
+        console.error('[ensureSchema] boot kickoff failed:', err);
+      }
+    });
+  } catch {
+    /* boot path stays clean */
+  }
+
   if (process.env.NODE_ENV !== 'production') return;
   try {
     const mod = await import(/* webpackIgnore: true */ './lib/scheduler/index.js');

@@ -15,12 +15,17 @@ import { sql } from 'drizzle-orm';
 export const runtime = 'nodejs';
 
 export async function GET() {
-  const u = await getCurrentUser();
-  // Also expose whether ANY user exists (so /register page can show "first
-  // user becomes admin" hint vs hide that fact).
-  const [{ count }] = (await db.execute(
-    sql`select count(*)::int as count from users`,
-  ).catch(() => [{ count: 0 }] as never)) as unknown as Array<{ count: number }>;
+  // Run user lookup and total-users count in parallel — they are independent.
+  // Fast path inside getCurrentUser() means the user lookup is usually ~1ms,
+  // but parallelizing keeps the cold-start case (legacy cookie -> DB fallback)
+  // from serializing on the count query too.
+  const [u, countRows] = await Promise.all([
+    getCurrentUser(),
+    db
+      .execute(sql`select count(*)::int as count from users`)
+      .catch(() => [{ count: 0 }] as never) as unknown as Promise<Array<{ count: number }>>,
+  ]);
+  const count = countRows[0]?.count ?? 0;
   return NextResponse.json(
     { user: u, totalUsers: Number(count ?? 0) },
     {

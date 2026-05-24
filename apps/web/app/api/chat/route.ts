@@ -171,14 +171,33 @@ export async function POST(req: NextRequest) {
 
   // ---- AuthN + per-user daily cap gate ----
   // getCurrentUser() returns the trimmed projection (id/username/isAdmin); we
-  // do a second tiny select here to pick up the per-user caps that the schema
+  // do a second tiny select to pick up the per-user caps that the schema
   // owner added (daily_token_cap, daily_usd_cap). NULL on either means
   // "unlimited for this user".
-  const sessionUser = await getCurrentUser();
+  //
+  // PERF: Body JSON read, session lookup, and the models.json import are all
+  // independent of one another — fan them out in parallel so the pre-stream
+  // round-trip is dominated by the slowest single call instead of the sum.
+  const bodyJsonP = req.json().catch((e) => ({ __err: e as unknown }));
+  const sessionUserP = getCurrentUser();
+  // models.json is needed later when building the fallback chain; importing
+  // it now overlaps the dynamic-import cost with the network/DB I/O above.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const registryP = import('@/lib/llm/models.json', { with: { type: 'json' } }) as unknown as Promise<{
+    default: Record<string, { models?: Array<{ id: string }> }>;
+  }>;
+
+  const sessionUser = await sessionUserP;
   if (!sessionUser) {
     return NextResponse.json({ error: 'unauthorized' }, { status: 401 });
   }
-  const [userCaps] = await db
+
+  // userCaps + daily usage are both keyed on sessionUser.id and are
+  // independent of each other (and of body parsing) — run all three in
+  // parallel. We always need usage when caps are set; speculatively fetching
+  // it costs one extra cheap roll-up read on the unlimited path, which is
+  // dwarfed by the latency we save on the common capped path.
+  const userCapsP = db
     .select({
       id: users.id,
       role: users.role,
@@ -188,6 +207,14 @@ export async function POST(req: NextRequest) {
     .from(users)
     .where(eq(users.id, sessionUser.id))
     .limit(1);
+  const usedP = getUserDailyUsage(sessionUser.id).catch((e) => {
+    // Don't fail the request on a usage-read error; treat as zero usage and
+    // let the request through (caps will simply not gate this turn).
+    console.error('[chat] getUserDailyUsage failed:', sanitizeError(e));
+    return { tokens_in: 0, tokens_out: 0, cost_usd: 0 };
+  });
+
+  const [[userCaps], used, bodyJsonRaw] = await Promise.all([userCapsP, usedP, bodyJsonP]);
   if (!userCaps) {
     // Session pointed at a now-deleted user. Treat as logged-out.
     return NextResponse.json({ error: 'unauthorized' }, { status: 401 });
@@ -202,7 +229,6 @@ export async function POST(req: NextRequest) {
       ? Number(userCaps.dailyUsdCap)
       : null;
   if (capTokens != null || capUsd != null) {
-    const used = await getUserDailyUsage(userId);
     const usedTokens = used.tokens_in + used.tokens_out;
     if (capTokens != null && usedTokens >= capTokens) {
       return NextResponse.json(
@@ -219,24 +245,28 @@ export async function POST(req: NextRequest) {
   }
 
   let body: z.infer<typeof BodySchema>;
-  try {
-    const json = await req.json();
+  {
+    const errored =
+      bodyJsonRaw && typeof bodyJsonRaw === 'object' && '__err' in (bodyJsonRaw as object);
+    if (errored) {
+      const e = (bodyJsonRaw as { __err: unknown }).__err;
+      console.error('[chat] body parse failed:', e);
+      return NextResponse.json(
+        { error: 'invalid request', detail: sanitizeError(e) },
+        { status: 400 },
+      );
+    }
+    const json = bodyJsonRaw as unknown;
     const parsed = BodySchema.safeParse(json);
     if (!parsed.success) {
       console.error('[chat] body validation failed:', parsed.error.issues);
-      console.error('[chat] received body keys:', Object.keys(json ?? {}));
+      console.error('[chat] received body keys:', Object.keys((json ?? {}) as object));
       return NextResponse.json(
         { error: 'invalid request', issues: parsed.error.issues },
         { status: 400 },
       );
     }
     body = parsed.data;
-  } catch (e) {
-    console.error('[chat] body parse failed:', e);
-    return NextResponse.json(
-      { error: 'invalid request', detail: sanitizeError(e) },
-      { status: 400 },
-    );
   }
 
   const {
@@ -275,15 +305,53 @@ export async function POST(req: NextRequest) {
     `[chat] tab=${tab} effort=${effort ?? 'medium'} iter=${effectiveIter} usdCap=${effectiveUsd}`,
   );
 
-  // Find-or-create chat row up-front so onFinish (on whichever attempt wins)
-  // persists into a stable id.
-  const chatId = await resolveChatId({
+  // PERF: chat-row resolution, the stock-context lookup, and the
+  // provider-key discovery scan are independent of each other AND of the
+  // tools/system-preamble assembly below. Fire them all off now and await
+  // their results just before they're needed.
+  const chatIdP = resolveChatId({
     chatIdIn,
     sessionIdIn,
     tab,
     stockId,
     modelId,
   });
+
+  // Per-provider `loadApiKey` calls each hit a DB row + decrypt; running the
+  // PROVIDERS array sequentially used to add ~6× one row-trip of latency.
+  // Promise.all collapses that to a single round-trip.
+  const providerKeysP = Promise.all(
+    PROVIDERS.map(async (p) => ({ p, key: await loadApiKey(p) })),
+  );
+
+  // Stock-context select (ownership-scoped). Only runs when stockId was
+  // supplied. We launch it before the system-preamble assembly so the result
+  // is already in hand by the time we splice it in.
+  const stockCtxP: Promise<string> = stockId
+    ? (async () => {
+        try {
+          // Ownership-scoped: only build stockCtx if the stock belongs to
+          // this user. Without the portfolios JOIN, a malicious client
+          // could pass another user's stockId in the request body and the
+          // model would happily run all its tools against that stock_id.
+          const [s] = await db
+            .select({ id: stocks.id, symbol: stocks.symbol, exchange: stocks.exchange, name: stocks.name })
+            .from(stocks)
+            .innerJoin(portfolios, eq(portfolios.id, stocks.portfolioId))
+            .where(and(eq(stocks.id, stockId), eq(portfolios.userId, sessionUser.id)))
+            .limit(1);
+          if (!s) return '';
+          return (
+            `Active stock: stock_id=${s.id}, symbol=${s.symbol}, exchange=${s.exchange}, name="${s.name}". ` +
+            `Use stock_id=${s.id} for every DB tool call (get_events, get_prices, get_business_context, search_news, upsert_*). ` +
+            `DO NOT call search_stocks for this stock — it is already in the database.`
+          );
+        } catch {
+          /* non-fatal */
+          return '';
+        }
+      })()
+    : Promise.resolve('');
 
   // Research = forward-looking, never reads DB; Analysis = DB-first with news fill.
   // Whitelist the relevant tool subset per tab so the model can't "cheat" by
@@ -310,30 +378,9 @@ export async function POST(req: NextRequest) {
 
   // Build a small system preamble so the model already knows the active stock
   // (avoids it calling search_stocks for a stock that's already in the DB),
-  // along with a hard rule against fabricating data.
-  let stockCtx = '';
-  if (stockId) {
-    try {
-      // Ownership-scoped: only build stockCtx if the stock belongs to this
-      // user. Without the portfolios JOIN, a malicious client could pass
-      // another user's stockId in the request body and the model would
-      // happily run all its tools against that stock_id.
-      const [s] = await db
-        .select({ id: stocks.id, symbol: stocks.symbol, exchange: stocks.exchange, name: stocks.name })
-        .from(stocks)
-        .innerJoin(portfolios, eq(portfolios.id, stocks.portfolioId))
-        .where(and(eq(stocks.id, stockId), eq(portfolios.userId, sessionUser.id)))
-        .limit(1);
-      if (s) {
-        stockCtx =
-          `Active stock: stock_id=${s.id}, symbol=${s.symbol}, exchange=${s.exchange}, name="${s.name}". ` +
-          `Use stock_id=${s.id} for every DB tool call (get_events, get_prices, get_business_context, search_news, upsert_*). ` +
-          `DO NOT call search_stocks for this stock — it is already in the database.`;
-      }
-    } catch {
-      /* non-fatal */
-    }
-  }
+  // along with a hard rule against fabricating data. The select was kicked
+  // off above (stockCtxP); we just await it here.
+  const stockCtx = await stockCtxP;
   const researchExtra =
     tab === 'research'
       ? [
@@ -414,6 +461,9 @@ export async function POST(req: NextRequest) {
   // Persist the user message IMMEDIATELY so a mid-stream crash, network drop,
   // or early stop still leaves the turn in history. Was previously inside
   // onFinish — which silently dropped chats that errored or never finished.
+  // We need chatId here for the first time, so await the resolveChatId
+  // promise we kicked off earlier.
+  const chatId = await chatIdP;
   let userMessagePersisted = false;
   if (lastUserMessageRaw) {
     const userParts = (lastUserMessageRaw as { parts?: unknown[] }).parts ?? [
@@ -542,17 +592,24 @@ export async function POST(req: NextRequest) {
   // and, for role='guest', transparently falls back to the admin's encrypted
   // row — so guest sessions can chat using inherited keys without us threading
   // anything explicit through this route.
+  //
+  // PERF: both the key scan (providerKeysP) and the models.json import
+  // (registryP) were kicked off above; await them together here. We also
+  // build a key map so the per-attempt `loadApiKey` call becomes a synchronous
+  // Map.get instead of another DB+decrypt round-trip.
+  const [providerKeyEntries, registryModule] = await Promise.all([
+    providerKeysP,
+    registryP,
+  ]);
+  const apiKeyByProvider = new Map<Provider, string>();
   const providersWithKeys: Provider[] = [];
-  for (const p of PROVIDERS) {
-    const k = await loadApiKey(p);
-    if (k) providersWithKeys.push(p);
+  for (const { p, key } of providerKeyEntries) {
+    if (key) {
+      apiKeyByProvider.set(p, key);
+      providersWithKeys.push(p);
+    }
   }
-
-  // Pull each provider's default model from the fallback registry.
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const registry: Record<string, { models?: Array<{ id: string }> }> = (
-    (await import('@/lib/llm/models.json', { with: { type: 'json' } })) as unknown as { default: Record<string, { models?: Array<{ id: string }> }> }
-  ).default;
+  const registry: Record<string, { models?: Array<{ id: string }> }> = registryModule.default;
 
   // Append every key-having provider's first model, deduped against the chain.
   const seen = new Set(rawChain.map((e) => `${e.provider}/${e.modelId}`));
@@ -591,7 +648,11 @@ export async function POST(req: NextRequest) {
     const isLast = i + 1 >= chain.length;
 
     // --- Per-attempt: key load ------------------------------------------------
-    const apiKey = await loadApiKey(attempt.provider);
+    // PERF: keys were fetched in parallel during discovery above and cached
+    // in `apiKeyByProvider`. Reuse the cached value rather than hitting the
+    // DB again for every attempt (this used to add one extra round-trip on
+    // the hot first-attempt path).
+    const apiKey = apiKeyByProvider.get(attempt.provider) ?? null;
     if (!apiKey) {
       lastStatus = 400;
       lastError = new Error(`no api key saved for ${attempt.provider}`);
