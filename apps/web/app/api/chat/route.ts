@@ -882,22 +882,43 @@ export async function POST(req: NextRequest) {
     { status: lastStatus || 502 },
   );
   } catch (err) {
-    // LAST-LINE BACKSTOP. Any throw that escapes the per-attempt try/catch
-    // and the per-phase await chains lands here. Without this, Next.js would
-    // emit an empty-body 500 and the user sees only "chat failed" with no
-    // diagnostic. We surface the phase (the most recently logged step) plus
-    // the sanitized error message so the next debugger has a thread to pull.
-    const detail = sanitizeError(err);
-    // Console with stack — sanitizeError drops the stack on purpose so it
-    // doesn't reach the client, but we want it in Vercel logs.
-    console.error(
-      `[chat] uncaught in phase=${currentPhase}:`,
-      err instanceof Error ? err.stack ?? err.message : err,
-    );
-    return NextResponse.json(
-      { error: detail, phase: currentPhase },
-      { status: typeof detail.status === 'number' ? detail.status : 500 },
-    );
+    // LAST-LINE BACKSTOP. Bulletproof: build the body manually so no helper
+    // can render it empty. Sanitize-fail and JSON-stringify-fail are both
+    // wrapped with their own try/catch so an unhappy `detail` object can
+    // never collapse to a Content-Length:0 response again (the bug that
+    // surfaced as "chat returns empty 500" on prod).
+    let message = 'unknown error';
+    let stack: string | undefined;
+    try {
+      if (err instanceof Error) {
+        message = err.message || err.name || 'unknown error';
+        stack = err.stack;
+      } else if (typeof err === 'string') {
+        message = err;
+      } else if (err && typeof err === 'object') {
+        message = String((err as { message?: unknown }).message ?? JSON.stringify(err));
+      }
+    } catch {
+      /* fall back to defaults */
+    }
+    // eslint-disable-next-line no-console
+    console.error(`[chat] uncaught in phase=${currentPhase}: ${message}${stack ? '\n' + stack : ''}`);
+    let body: string;
+    try {
+      body = JSON.stringify({
+        error: message,
+        phase: currentPhase,
+        // Helpful flag so the client UI can show "this was a server bug, not
+        // user error" — never trust empty 500s again.
+        kind: 'server_exception',
+      });
+    } catch {
+      body = '{"error":"chat failed","phase":"unknown","kind":"server_exception"}';
+    }
+    return new NextResponse(body, {
+      status: 500,
+      headers: { 'content-type': 'application/json; charset=utf-8' },
+    });
   }
 }
 
