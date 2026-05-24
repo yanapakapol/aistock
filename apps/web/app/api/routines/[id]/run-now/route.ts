@@ -1,8 +1,9 @@
 import { NextResponse, type NextRequest } from 'next/server';
 import { z } from 'zod';
-import { eq } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 import { db } from '@/lib/db/client';
 import { routines, routineRuns } from '@/lib/db/schema';
+import { getCurrentUser } from '@/lib/auth/session';
 import { getScheduler } from '@/lib/scheduler';
 import { runRoutineOnce, type RoutineForRun } from '@/lib/scheduler/run';
 
@@ -32,12 +33,22 @@ export async function POST(
     return r as Response;
   }
 
+  const me = await getCurrentUser();
+  if (!me) return NextResponse.json({ error: 'unauthorized' }, { status: 401 });
+
   const { id: idRaw } = await params;
   const idParsed = IdSchema.safeParse(idRaw);
   if (!idParsed.success) return NextResponse.json({ error: 'bad id' }, { status: 400 });
   const routineId = idParsed.data;
 
-  const rows = await db.select().from(routines).where(eq(routines.id, routineId)).limit(1);
+  // Owner-scoped load — orphan rows (user_id IS NULL, pre-multitenant) won't
+  // match, and another user's routine returns the same 404 to avoid leaking
+  // routine ids across tenants.
+  const rows = await db
+    .select()
+    .from(routines)
+    .where(and(eq(routines.id, routineId), eq(routines.userId, me.id)))
+    .limit(1);
   const routine = rows[0];
   if (!routine) return NextResponse.json({ error: 'not found' }, { status: 404 });
 

@@ -5,7 +5,6 @@ import {
   apiKeys,
   chats,
   portfolios,
-  stocks,
   users,
   userTokenUsage,
 } from '@/lib/db/schema';
@@ -27,10 +26,12 @@ export interface GuestCleanupSummary {
  * Cascade behaviour (worth re-checking when schema changes):
  *  - Deleting a portfolio cascades to stocks → events / future_events /
  *    prices_* / fundamentals / research_tasks / news_chunks / etc.
- *  - Chats only reference stocks (set null on delete), not users, so we
- *    must collect the user's stock ids and delete the chats explicitly
- *    BEFORE wiping portfolios, otherwise chats get orphaned with
- *    `stock_id = NULL` and stay forever.
+ *  - Chats now carry user_id (added in the hardening pass) and the FK is
+ *    ON DELETE CASCADE — but guest cleanup KEEPS the user row (rolls
+ *    expires_at forward, see step 6 below), so the cascade never fires.
+ *    We therefore delete chats explicitly by user_id here. The old
+ *    stock_id-join path missed chats whose stock had already been
+ *    deleted (stock_id IS NULL after ON DELETE SET NULL).
  *
  * Invocation paths:
  *  - In-process scheduler (`lib/scheduler/index.ts`) fires this at 03:00 UTC
@@ -56,19 +57,12 @@ export async function cleanupExpiredGuestData(now: Date = new Date()): Promise<G
   const userIds = expired.map((u) => u.id);
   let rowsDeleted = 0;
 
-  // 2. Collect every stock owned (transitively) by these users so we can
-  //    nuke chats keyed on those stocks before portfolios are dropped.
-  const stockRows = await db
-    .select({ id: stocks.id })
-    .from(stocks)
-    .innerJoin(portfolios, eq(stocks.portfolioId, portfolios.id))
-    .where(inArray(portfolios.userId, userIds));
-  const stockIds = stockRows.map((s) => s.id);
-
-  if (stockIds.length > 0) {
-    const chatDel = await db.delete(chats).where(inArray(chats.stockId, stockIds));
-    rowsDeleted += rowCount(chatDel);
-  }
+  // 2. Chats — delete directly by user_id. Catches every chat owned by
+  //    the guest, including ones whose stock_id is already NULL because
+  //    the underlying stock was deleted earlier. Old code joined through
+  //    stocks→portfolios, which would leave those orphan chats behind.
+  const chatDel = await db.delete(chats).where(inArray(chats.userId, userIds));
+  rowsDeleted += rowCount(chatDel);
 
   // 3. Portfolios (cascades to stocks → events / prices / fundamentals / …).
   const portDel = await db.delete(portfolios).where(inArray(portfolios.userId, userIds));

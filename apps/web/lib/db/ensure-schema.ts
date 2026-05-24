@@ -562,6 +562,51 @@ async function runBumps(): Promise<void> {
     'CREATE routines_user_idx',
     'CREATE INDEX IF NOT EXISTS routines_user_idx ON routines(user_id)',
   );
+
+  // -------------------------------------------------------------------
+  // 4. DB hardening pass — per-user ownership on chats and
+  //    push_subscriptions, plus a couple of small indexes / partial
+  //    uniques that close races. All idempotent.
+  // -------------------------------------------------------------------
+
+  // chats.user_id — without this, deleting a stock turns its chats into
+  // orphans (stock_id IS NULL via ON DELETE SET NULL) that no cleanup
+  // pass can find. ON DELETE CASCADE means a user delete reliably wipes
+  // their chats too.
+  await db.execute(
+    sql`ALTER TABLE chats ADD COLUMN IF NOT EXISTS user_id integer REFERENCES users(id) ON DELETE CASCADE`,
+  );
+  await db.execute(
+    sql`CREATE INDEX IF NOT EXISTS chats_user_idx ON chats (user_id, created_at)`,
+  );
+
+  // push_subscriptions.user_id — push was previously global (every
+  // subscriber received every routine notification). Tie subscriptions
+  // to the user who created them; the sender filters on user_id.
+  await db.execute(
+    sql`ALTER TABLE push_subscriptions ADD COLUMN IF NOT EXISTS user_id integer REFERENCES users(id) ON DELETE CASCADE`,
+  );
+  await db.execute(
+    sql`CREATE INDEX IF NOT EXISTS push_subscriptions_user_idx ON push_subscriptions (user_id)`,
+  );
+
+  // Hot index — every /api/portfolios* path filters by user_id; without
+  // an index it becomes a seq-scan once the table grows.
+  await db.execute(
+    sql`CREATE INDEX IF NOT EXISTS portfolios_user_idx ON portfolios (user_id)`,
+  );
+
+  // Partial unique on portfolios(user_id) WHERE name='Default' — closes
+  // the SELECT-then-INSERT race in getDefaultPortfolioId. Two concurrent
+  // requests for the same user used to be able to both miss the existence
+  // check and both create a "Default" row; the partial unique turns the
+  // second INSERT into a constraint violation the caller catches and
+  // re-selects. Wrapped in tryStmt because pre-migration duplicate rows
+  // would otherwise block index creation indefinitely.
+  await tryStmt(
+    'CREATE portfolios_user_default_uq',
+    `CREATE UNIQUE INDEX IF NOT EXISTS portfolios_user_default_uq ON portfolios (user_id) WHERE name = 'Default'`,
+  );
 }
 
 /**

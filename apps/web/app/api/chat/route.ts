@@ -981,12 +981,20 @@ async function createChat(
   stockId: number | undefined,
   modelId: string,
   sessionId?: string | null,
+  userId?: number | null,
 ): Promise<number> {
   const [row] = await db
     .insert(chats)
     .values({
       tab,
       stockId: stockId ?? null,
+      // True per-user owner. Pass-through from the route's authenticated
+      // session — without this, deleting a stock orphans the chat forever
+      // (the stock_id FK is ON DELETE SET NULL). Optional so legacy
+      // call-sites that haven't been threaded with the session userId yet
+      // still compile; those produce orphan rows the cleanup pass can't
+      // reach, so callers should always supply userId in new code.
+      userId: userId ?? null,
       model: modelId,
       sessionId: sessionId ?? null,
     })
@@ -1000,8 +1008,10 @@ async function resolveChatId(args: {
   tab: 'research' | 'analysis';
   stockId: number | undefined;
   modelId: string;
+  /** Optional — passed through to createChat so new chats are owned. */
+  userId?: number | null;
 }): Promise<number> {
-  const { chatIdIn, sessionIdIn, tab, stockId, modelId } = args;
+  const { chatIdIn, sessionIdIn, tab, stockId, modelId, userId } = args;
 
   if (chatIdIn != null) {
     const [existing] = await db
@@ -1022,10 +1032,10 @@ async function resolveChatId(args: {
       .where(eq(chats.sessionId, sessionIdIn))
       .limit(1);
     if (existing) return existing.id;
-    return createChat(tab, stockId, modelId, sessionIdIn);
+    return createChat(tab, stockId, modelId, sessionIdIn, userId);
   }
 
-  return createChat(tab, stockId, modelId, null);
+  return createChat(tab, stockId, modelId, null, userId);
 }
 
 type Role = (typeof messageRoleEnum.enumValues)[number];

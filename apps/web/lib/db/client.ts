@@ -36,6 +36,20 @@ function makeClient() {
       'DATABASE_URL is not set. Add it to your hosting provider env vars (Netlify: Site settings → Environment; Vercel: Project Settings → Environment Variables).',
     );
   }
+  // neon-http REQUIRES a Neon pooler endpoint — direct (compute) endpoints
+  // either reject HTTPS queries outright or behave inconsistently across
+  // edge runtimes. Pooler hostnames carry `-pooler.` (modern) or `pooler-`
+  // (legacy). Warn loudly instead of erroring so a self-hosted Postgres
+  // (e.g. local docker) using the same DATABASE_URL slot still boots.
+  if (url.includes('neon.tech') && !url.includes('-pooler.') && !url.includes('pooler-')) {
+    // eslint-disable-next-line no-console
+    console.warn(
+      '[db/client] DATABASE_URL points at a Neon host without a pooler segment ' +
+        '(no "-pooler." / "pooler-" in the hostname). neon-http requires the ' +
+        'pooled endpoint — your queries may fail or hang. Copy the *Pooled* ' +
+        'connection string from the Neon dashboard.',
+    );
+  }
   const sql = neon(url);
   return drizzle(sql, { schema });
 }

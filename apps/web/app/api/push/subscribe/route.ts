@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { sql } from 'drizzle-orm';
 import { db } from '@/lib/db/client';
 import { pushSubscriptions } from '@/lib/db/schema';
+import { getCurrentUser } from '@/lib/auth/session';
 
 export const runtime = 'nodejs';
 
@@ -33,6 +34,13 @@ export async function POST(req: NextRequest) {
     return r as Response;
   }
 
+  // Authenticated subscription only — push fan-out filters on user_id so a
+  // global (NULL user_id) row would never receive any notification anyway.
+  const me = await getCurrentUser().catch(() => null);
+  if (!me) {
+    return NextResponse.json({ ok: false, error: 'unauthorized' }, { status: 401 });
+  }
+
   let raw: unknown;
   try {
     raw = await req.json();
@@ -52,9 +60,13 @@ export async function POST(req: NextRequest) {
 
   // Upsert on `endpoint` — refresh keys + clear any prior disable flag so a
   // user re-enabling notifications on the same device immediately gets pushes.
+  // Reassign user_id on conflict too: if the same browser is re-subscribed
+  // after a sign-out / sign-in into a different account, the row now belongs
+  // to the new user (and the previous user stops getting that device's pushes).
   const [row] = await db
     .insert(pushSubscriptions)
     .values({
+      userId: me.id,
       endpoint,
       p256dh: keys.p256dh,
       auth: keys.auth,
@@ -63,6 +75,7 @@ export async function POST(req: NextRequest) {
     .onConflictDoUpdate({
       target: pushSubscriptions.endpoint,
       set: {
+        userId: me.id,
         p256dh: keys.p256dh,
         auth: keys.auth,
         userAgent,

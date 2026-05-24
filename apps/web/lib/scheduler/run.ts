@@ -372,6 +372,17 @@ function nextFireAfter(
  * scheduled fire (from `lastRunAt` + `cronExpr` + `tz`) is at or before
  * `now`, and also runs the cheap-idempotent guest-data cleanup sweep.
  *
+ * SECURITY NOTE: this function is a *privileged system caller* — the cron
+ * tick endpoint is the system, not a user, so it deliberately iterates ALL
+ * enabled routines regardless of `routines.user_id`. Do NOT add a user-id
+ * filter here; the per-user gating happens at the HTTP route layer
+ * (`/api/routines/*` filter by session user, `create_routine` MCP tool
+ * requires `ctx.userId`). `routines.user_id` is nullable in the schema for
+ * backfill safety on pre-multitenant orphan rows; orphans still execute
+ * here because the cron treats them as system routines, but they're
+ * invisible to every user route and so cannot be edited, listed, or
+ * deleted from the UI.
+ *
  * Design notes:
  *   - Each routine that's due is executed sequentially in chronological order
  *     of its earliest due fire. This bounds tail latency of a single tick on

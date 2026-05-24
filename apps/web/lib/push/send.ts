@@ -4,6 +4,17 @@ import webPush from 'web-push';
 import { db } from '../db/client';
 import { outboundAudit, pushSubscriptions } from '../db/schema';
 
+export interface SendOptions {
+  /**
+   * If set, only deliver to subscriptions owned by this user. Used by routine
+   * notifications so a routine's "done" push goes to its owner only and not
+   * to every subscriber on the server. Omit to broadcast to ALL active
+   * subscriptions (the historical, multi-tenant-unsafe behavior — kept for
+   * server-wide system alerts the admin may want to send in the future).
+   */
+  userId?: number;
+}
+
 export interface PushPayload {
   title: string;
   body: string;
@@ -74,14 +85,21 @@ interface SendResult {
  *    or headers are persisted (matches the audit policy in lib/security).
  *  - On success, we stamp `last_sent_at`.
  */
-export async function sendPushToAll(payload: PushPayload): Promise<SendResult> {
+export async function sendPushToAll(
+  payload: PushPayload,
+  options: SendOptions = {},
+): Promise<SendResult> {
   const keys = getVapidKeys();
   ensureVapidConfigured(keys);
 
-  const subs = await db
-    .select()
-    .from(pushSubscriptions)
-    .where(isNull(pushSubscriptions.disabledAt));
+  // When a userId filter is provided, restrict to that user's active
+  // subscriptions. Otherwise broadcast (legacy/system-alert path).
+  const whereClause =
+    options.userId != null
+      ? and(isNull(pushSubscriptions.disabledAt), eq(pushSubscriptions.userId, options.userId))
+      : isNull(pushSubscriptions.disabledAt);
+
+  const subs = await db.select().from(pushSubscriptions).where(whereClause);
 
   const json = JSON.stringify({
     title: payload.title,

@@ -157,6 +157,19 @@ async function main() {
   await sql`ALTER TABLE routines ADD COLUMN IF NOT EXISTS user_id integer REFERENCES users(id) ON DELETE CASCADE`;
   await sql`CREATE INDEX IF NOT EXISTS routines_user_idx ON routines(user_id)`;
 
+  // ---- DB hardening pass — per-user chats + push, hot indexes ----
+  // Mirrors the same ALTER/INDEX additions in ensure-schema.ts so a
+  // CLI-driven migrate puts a fresh DB into the same shape an HTTP-
+  // request-driven ensureSchema would.
+  await sql`ALTER TABLE chats ADD COLUMN IF NOT EXISTS user_id integer REFERENCES users(id) ON DELETE CASCADE`;
+  await sql`CREATE INDEX IF NOT EXISTS chats_user_idx ON chats (user_id, created_at)`;
+  await sql`ALTER TABLE push_subscriptions ADD COLUMN IF NOT EXISTS user_id integer REFERENCES users(id) ON DELETE CASCADE`;
+  await sql`CREATE INDEX IF NOT EXISTS push_subscriptions_user_idx ON push_subscriptions (user_id)`;
+  await sql`CREATE INDEX IF NOT EXISTS portfolios_user_idx ON portfolios (user_id)`;
+  // Partial unique closes the SELECT-then-INSERT race in getDefaultPortfolioId.
+  await sql`CREATE UNIQUE INDEX IF NOT EXISTS portfolios_user_default_uq
+            ON portfolios (user_id) WHERE name = 'Default'`;
+
   await sql.end();
   // eslint-disable-next-line no-console
   console.log('migrated');

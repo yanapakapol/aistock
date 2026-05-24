@@ -22,9 +22,20 @@ const csp = [
 
 const config: NextConfig = {
   reactStrictMode: true,
-  output: 'standalone',
+  // `output: 'standalone'` was here for Docker / self-hosted Node deploys.
+  // REMOVED for Vercel: standalone mode changes Next.js's build output to
+  // a self-contained server.js bundle, and Vercel's deploy pipeline
+  // doesn't (consistently) detect when route bundles change inside that
+  // output — explaining why 10+ commits to /api/chat appeared to deploy
+  // but actually kept the stale function. Without `standalone`, Vercel
+  // gets the default per-route serverless function output and re-uploads
+  // each route's bundle when it changes.
+  //
+  // If you self-host on Docker again, re-add this and use the included
+  // .next/standalone/server.js entrypoint.
+  //
   // Gzip text/JSON responses. Redundant on Vercel (edge already compresses) but
-  // load-bearing on self-hosted / Oracle Cloud + Node server.
+  // load-bearing on self-hosted / Oracle Cloud + Node server. Cheap to keep.
   compress: true,
   serverExternalPackages: [
     '@primno/dpapi',

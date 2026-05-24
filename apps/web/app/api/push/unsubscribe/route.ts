@@ -1,8 +1,9 @@
 import { NextResponse, type NextRequest } from 'next/server';
 import { z } from 'zod';
-import { eq } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 import { db } from '@/lib/db/client';
 import { pushSubscriptions } from '@/lib/db/schema';
+import { getCurrentUser } from '@/lib/auth/session';
 
 export const runtime = 'nodejs';
 
@@ -24,6 +25,13 @@ export async function POST(req: NextRequest) {
     return r as Response;
   }
 
+  // Authenticated unsubscribe — scope to the caller so user A can't disable
+  // user B's subscription by guessing its endpoint URL.
+  const me = await getCurrentUser().catch(() => null);
+  if (!me) {
+    return NextResponse.json({ ok: false, error: 'unauthorized' }, { status: 401 });
+  }
+
   let raw: unknown;
   try {
     raw = await req.json();
@@ -38,7 +46,12 @@ export async function POST(req: NextRequest) {
   await db
     .update(pushSubscriptions)
     .set({ disabledAt: new Date() })
-    .where(eq(pushSubscriptions.endpoint, parsed.data.endpoint));
+    .where(
+      and(
+        eq(pushSubscriptions.endpoint, parsed.data.endpoint),
+        eq(pushSubscriptions.userId, me.id),
+      ),
+    );
 
   return NextResponse.json({ ok: true });
 }

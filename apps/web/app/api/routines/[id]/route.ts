@@ -1,9 +1,10 @@
 import { NextResponse, type NextRequest } from 'next/server';
 import { z } from 'zod';
-import { eq } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 import { CronExpressionParser } from 'cron-parser';
 import { db } from '@/lib/db/client';
 import { routines } from '@/lib/db/schema';
+import { getCurrentUser } from '@/lib/auth/session';
 import { getScheduler } from '@/lib/scheduler';
 
 export const runtime = 'nodejs';
@@ -33,8 +34,17 @@ function requireSameOrigin(req: NextRequest) {
   }
 }
 
-async function loadRoutine(id: number) {
-  const rows = await db.select().from(routines).where(eq(routines.id, id)).limit(1);
+/**
+ * Owner-scoped routine fetch. Rows with `user_id IS NULL` (pre-multitenant
+ * orphans) are treated as not owned by anyone and won't match this query —
+ * exactly the behavior we want from a security-isolation standpoint.
+ */
+async function loadOwnedRoutine(id: number, userId: number) {
+  const rows = await db
+    .select()
+    .from(routines)
+    .where(and(eq(routines.id, id), eq(routines.userId, userId)))
+    .limit(1);
   return rows[0] ?? null;
 }
 
@@ -47,6 +57,9 @@ export async function PATCH(
   } catch (r) {
     return r as Response;
   }
+
+  const me = await getCurrentUser();
+  if (!me) return NextResponse.json({ error: 'unauthorized' }, { status: 401 });
 
   const { id: idRaw } = await params;
   const idParsed = IdSchema.safeParse(idRaw);
@@ -62,7 +75,8 @@ export async function PATCH(
     );
   }
 
-  const existing = await loadRoutine(id);
+  // Ownership gate BEFORE any write — never trust the id alone.
+  const existing = await loadOwnedRoutine(id, me.id);
   if (!existing) return NextResponse.json({ error: 'not found' }, { status: 404 });
 
   const data = parsed.data;
@@ -92,10 +106,12 @@ export async function PATCH(
   if (data.enabled !== undefined) update.enabled = data.enabled;
   if (data.maxUsdPerRun !== undefined) update.maxUsdPerRun = data.maxUsdPerRun.toFixed(4);
 
+  // Belt-and-braces: the WHERE filters by user_id too, so a TOCTOU race on
+  // ownership transfer can't sneak a write past the gate.
   const [updated] = await db
     .update(routines)
     .set(update)
-    .where(eq(routines.id, id))
+    .where(and(eq(routines.id, id), eq(routines.userId, me.id)))
     .returning();
 
   try {
@@ -125,14 +141,21 @@ export async function DELETE(
     return r as Response;
   }
 
+  const me = await getCurrentUser();
+  if (!me) return NextResponse.json({ error: 'unauthorized' }, { status: 401 });
+
   const { id: idRaw } = await params;
   const idParsed = IdSchema.safeParse(idRaw);
   if (!idParsed.success) return NextResponse.json({ error: 'bad id' }, { status: 400 });
   const id = idParsed.data;
 
+  // Ownership filter is baked into the DELETE itself — another user's id
+  // (or a NULL-user_id orphan) won't match, so the result.length === 0
+  // branch returns the same 404 used for "doesn't exist" to avoid leaking
+  // the existence of other users' routine ids.
   const result = await db
     .delete(routines)
-    .where(eq(routines.id, id))
+    .where(and(eq(routines.id, id), eq(routines.userId, me.id)))
     .returning({ id: routines.id });
   if (result.length === 0) return NextResponse.json({ error: 'not found' }, { status: 404 });
 

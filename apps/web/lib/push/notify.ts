@@ -9,16 +9,26 @@ import { sendPushToAll } from './send';
  * not a broken routine.
  */
 export async function notifyRoutineDone(
-  routine: { name: string },
+  routine: { name: string; userId?: number | null },
   outputMd: string,
 ): Promise<void> {
   try {
     const body = (outputMd ?? '').slice(0, 140);
-    await sendPushToAll({
-      title: `Routine done: ${routine.name}`,
-      body,
-      url: '/routines',
-    });
+    // Scope to the routine owner when known so a routine's "done" push only
+    // lands on that user's devices. Pre-multi-tenant rows may carry
+    // userId === null; for those we fall back to broadcast (current behavior).
+    const userId =
+      typeof routine.userId === 'number' && Number.isFinite(routine.userId)
+        ? routine.userId
+        : undefined;
+    await sendPushToAll(
+      {
+        title: `Routine done: ${routine.name}`,
+        body,
+        url: '/routines',
+      },
+      userId != null ? { userId } : {},
+    );
   } catch (err) {
     // Most likely: missing VAPID keys in env. Log once and move on.
     console.warn(

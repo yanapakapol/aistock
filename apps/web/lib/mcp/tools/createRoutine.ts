@@ -29,7 +29,15 @@ export const createRoutine: ToolHandler<Input, Output> = {
     'Create a scheduled routine that re-runs a prompt on a cron. Validates the cron expression in the given timezone (defaults to Asia/Bangkok), inserts the row, and arms the in-process scheduler so the routine is live immediately.',
   input,
   output,
-  async execute(args) {
+  async execute(args, ctx) {
+    // Mirror the assertOwnsStock contract: writes require an authenticated
+    // caller. The MCP HTTP endpoint can call tools without a session cookie,
+    // and we MUST NOT let it create unowned (orphan) routines that any user
+    // could then trip over via id-guessing.
+    if (!ctx.userId) {
+      throw new Error('forbidden: no authenticated user');
+    }
+
     const tz = args.tz ?? 'Asia/Bangkok';
 
     // Validate cron and derive next fire.
@@ -49,6 +57,7 @@ export const createRoutine: ToolHandler<Input, Output> = {
     const [inserted] = await db
       .insert(routines)
       .values({
+        userId: ctx.userId,
         name: args.name,
         prompt: args.prompt,
         tab: args.tab,
