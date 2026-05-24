@@ -31,7 +31,10 @@ interface Selection {
 }
 
 const LS_KEY = 'aistock:model:research';
-const DEFAULT_SEL: Selection = { provider: 'anthropic', modelId: 'claude-sonnet-4-6' };
+// Defaults to Mistral Medium (cheap + fast). Real Mistral API model id —
+// the InlineModelPicker validates this against the live registry on hydration
+// and swaps to whichever provider the user actually has a key for.
+const DEFAULT_SEL: Selection = { provider: 'mistral', modelId: 'mistral-medium-latest' };
 
 const PLAN_PROMPT_TEMPLATE = (s: StockLite) =>
   `Build a research plan for ${s.symbol} (${s.exchange}) — ${s.name}. ` +

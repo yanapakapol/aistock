@@ -21,10 +21,13 @@ interface Selection {
 }
 
 export function ModelPicker() {
+  // Defaults to real Mistral API model ids. Cheap + fast. The user can
+  // override per-tab; the InlineModelPicker in chat headers also reads /
+  // writes these LS keys (`aistock:model:<tab>`) so changes propagate.
   const [byTab, setByTab] = useState<Record<Tab, Selection>>(() => ({
-    research: { provider: 'anthropic', modelId: 'claude-sonnet-4-6' },
-    analysis: { provider: 'anthropic', modelId: 'claude-sonnet-4-6' },
-    routines: { provider: 'anthropic', modelId: 'claude-haiku-4-5' },
+    research: { provider: 'mistral', modelId: 'mistral-medium-latest' },
+    analysis: { provider: 'mistral', modelId: 'mistral-medium-latest' },
+    routines: { provider: 'mistral', modelId: 'mistral-small-latest' },
   }));
   const [modelsByProvider, setModelsByProvider] = useState<Partial<Record<Provider, ModelInfo[]>>>({});
 

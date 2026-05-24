@@ -460,7 +460,7 @@ function NewRoutineModal({ onClose, onCreated }: ModalProps) {
             </Select>
           </Field>
           <Field label="Model">
-            <Input value={model} onChange={(e) => setModel(e.target.value)} placeholder="claude-sonnet-4-6" />
+            <Input value={model} onChange={(e) => setModel(e.target.value)} placeholder="mistral-medium-latest" />
           </Field>
         </div>
 
@@ -468,7 +468,7 @@ function NewRoutineModal({ onClose, onCreated }: ModalProps) {
           <Input
             value={fallbacks}
             onChange={(e) => setFallbacks(e.target.value)}
-            placeholder="claude-haiku-4-5, gpt-5.5"
+            placeholder="mistral-small-latest, gpt-4o-mini"
           />
         </Field>
 

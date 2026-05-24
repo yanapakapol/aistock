@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { Component, useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
 import { Trash2, RefreshCw } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Select } from '@/components/ui/select';
@@ -9,12 +9,33 @@ import { SearchCombobox, type SearchResult } from '@/components/portfolio/search
 import { PriceChart, type PricePoint } from '@/components/portfolio/price-chart';
 import { usePrefetchHandlers } from '@/components/prefetch-link';
 
+// ---------------------------------------------------------------------------
+// ROOT CAUSE OF THE 2026-05 /portfolio CLIENT CRASH ("Application error: a
+// client-side exception has occurred"):
+//
+// Postgres `numeric(18,6)` columns (open/high/low/close in prices_daily) and
+// `bigint` (volume) are returned by the drizzle / neon-http pipeline as
+// STRINGS, not JS numbers — JSON can't roundtrip BigInt, and numeric is kept
+// as text to preserve precision. The previous client typed PriceRow.close as
+// `number` and called `last.close.toFixed(2)` directly at render time, which
+// threw "last.close.toFixed is not a function" and tripped Next's generic
+// error page. The same shape mismatch existed for Stock.id (DB serial →
+// number, typed as string here); that one silently broke selection rather
+// than crashing because `'5' === 5` is just false.
+//
+// Fix: normalize rows at the network/cache boundary (`normalizePriceRow`,
+// `normalizeStock`) so the render layer can safely treat numeric fields as
+// numbers, and correct the Stock.id type to `number`. Also wrap the main
+// JSX in a small PortfolioErrorBoundary so any future shape regression
+// surfaces a readable error to the user instead of the Vercel chrome.
+// ---------------------------------------------------------------------------
+
 interface Stock {
-  id: string;
+  id: number;
   symbol: string;
   exchange: string;
   name: string;
-  currency: string;
+  currency: string | null;
   addedAt: string;
 }
 
@@ -41,11 +62,130 @@ function todayIso(): string {
   return new Date().toISOString().slice(0, 10);
 }
 
+/**
+ * Coerce a value that might be string|number|bigint|null|undefined into a
+ * JS number. Returns NaN on failure rather than 0 so callers can decide how
+ * to handle missing data without confusing it with a real zero price.
+ */
+function toNum(v: unknown): number {
+  if (typeof v === 'number' && Number.isFinite(v)) return v;
+  if (typeof v === 'string' && v.length > 0) {
+    const n = Number(v);
+    if (Number.isFinite(n)) return n;
+  }
+  if (typeof v === 'bigint') return Number(v);
+  return Number.NaN;
+}
+
+function normalizePriceRow(r: unknown): PriceRow | null {
+  if (!r || typeof r !== 'object') return null;
+  const o = r as Record<string, unknown>;
+  const date = typeof o.date === 'string' ? o.date : null;
+  const close = toNum(o.close);
+  if (!date || !Number.isFinite(close)) return null;
+  return {
+    date,
+    open: toNum(o.open),
+    high: toNum(o.high),
+    low: toNum(o.low),
+    close,
+    volume: toNum(o.volume),
+  };
+}
+
+function normalizePriceRows(rows: unknown): PriceRow[] {
+  if (!Array.isArray(rows)) return [];
+  const out: PriceRow[] = [];
+  for (const r of rows) {
+    const norm = normalizePriceRow(r);
+    if (norm) out.push(norm);
+  }
+  return out;
+}
+
+function normalizeStock(s: unknown): Stock | null {
+  if (!s || typeof s !== 'object') return null;
+  const o = s as Record<string, unknown>;
+  const idRaw = o.id;
+  const id = typeof idRaw === 'number' ? idRaw : Number(idRaw);
+  if (!Number.isFinite(id)) return null;
+  return {
+    id,
+    symbol: typeof o.symbol === 'string' ? o.symbol : '',
+    exchange: typeof o.exchange === 'string' ? o.exchange : '',
+    name: typeof o.name === 'string' ? o.name : '',
+    currency: typeof o.currency === 'string' ? o.currency : null,
+    addedAt: typeof o.addedAt === 'string' ? o.addedAt : '',
+  };
+}
+
+function normalizeStocks(arr: unknown): Stock[] {
+  if (!Array.isArray(arr)) return [];
+  const out: Stock[] = [];
+  for (const s of arr) {
+    const norm = normalizeStock(s);
+    if (norm) out.push(norm);
+  }
+  return out;
+}
+
+/**
+ * Inline error boundary scoped to /portfolio. React's error boundaries
+ * *must* be class components — there's no hook equivalent. We render a
+ * compact error card with the actual message so the user sees what went
+ * wrong instead of the generic Vercel "Application error" page. The page
+ * is still recoverable via a hard reload.
+ */
+interface BoundaryState {
+  error: Error | null;
+}
+class PortfolioErrorBoundary extends Component<{ children: ReactNode }, BoundaryState> {
+  override state: BoundaryState = { error: null };
+  static getDerivedStateFromError(error: unknown): BoundaryState {
+    return { error: error instanceof Error ? error : new Error(String(error)) };
+  }
+  override componentDidCatch(error: unknown) {
+    // Surface in the browser console so a logged-in user can copy the stack.
+    // eslint-disable-next-line no-console
+    console.error('[PortfolioClient] render error', error);
+  }
+  override render() {
+    if (this.state.error) {
+      return (
+        <div className="flex h-full items-center justify-center p-6">
+          <div className="max-w-md rounded-md border border-red-500/40 bg-red-500/5 p-4 text-sm">
+            <div className="font-semibold text-red-500">Failed to load portfolio</div>
+            <div className="mt-1 break-words text-muted-foreground">
+              {this.state.error.message || 'Unknown render error'}
+            </div>
+            <button
+              type="button"
+              onClick={() => window.location.reload()}
+              className="mt-3 rounded border border-border px-2 py-1 text-xs hover:bg-accent"
+            >
+              Reload
+            </button>
+          </div>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
 export function PortfolioClient() {
+  return (
+    <PortfolioErrorBoundary>
+      <PortfolioClientInner />
+    </PortfolioErrorBoundary>
+  );
+}
+
+function PortfolioClientInner() {
   const [stocks, setStocks] = useState<Stock[]>([]);
   const [loadingList, setLoadingList] = useState(true);
   const [listErr, setListErr] = useState<string | null>(null);
-  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [selectedId, setSelectedId] = useState<number | null>(null);
   const [range, setRange] = useState<Range>('6M');
   const [prices, setPrices] = useState<PriceRow[]>([]);
   const [loadingPrices, setLoadingPrices] = useState(false);
@@ -53,7 +193,7 @@ export function PortfolioClient() {
   const [ingesting, setIngesting] = useState(false);
   const [ingestMsg, setIngestMsg] = useState<string | null>(null);
   const [adding, setAdding] = useState(false);
-  const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [deletingId, setDeletingId] = useState<number | null>(null);
 
   const selected = useMemo(
     () => stocks.find((s) => s.id === selectedId) ?? null,
@@ -80,8 +220,10 @@ export function PortfolioClient() {
         return;
       }
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
-      const j = (await r.json()) as { stocks: Stock[] };
-      const fresh = j.stocks ?? [];
+      const j = (await r.json()) as { stocks?: unknown };
+      // Normalize at the network boundary so render-layer code can trust
+      // the shape (id is number, not string from a stale cache).
+      const fresh = normalizeStocks(j?.stocks);
       setStocks(fresh);
       try {
         sessionStorage.setItem(
@@ -92,7 +234,7 @@ export function PortfolioClient() {
         /* ignore */
       }
       setSelectedId((prev) => {
-        if (prev && fresh.some((s) => s.id === prev)) return prev;
+        if (prev != null && fresh.some((s) => s.id === prev)) return prev;
         return fresh[0]?.id ?? null;
       });
     } catch (e) {
@@ -108,11 +250,12 @@ export function PortfolioClient() {
     try {
       const raw = sessionStorage.getItem('aistock:cache:/api/portfolio');
       if (raw) {
-        const parsed = JSON.parse(raw) as { v: { stocks: Stock[] } };
-        if (parsed?.v?.stocks?.length) {
-          setStocks(parsed.v.stocks);
+        const parsed = JSON.parse(raw) as { v?: { stocks?: unknown } };
+        const cachedStocks = normalizeStocks(parsed?.v?.stocks);
+        if (cachedStocks.length > 0) {
+          setStocks(cachedStocks);
           setLoadingList(false);
-          setSelectedId((prev) => prev ?? parsed.v.stocks[0]?.id ?? null);
+          setSelectedId((prev) => prev ?? cachedStocks[0]?.id ?? null);
         }
       }
     } catch {
@@ -121,20 +264,21 @@ export function PortfolioClient() {
     void loadStocks();
   }, [loadStocks]);
 
-  const loadPrices = useCallback(async (stockId: string, r: Range) => {
+  const loadPrices = useCallback(async (stockId: number, r: Range) => {
     const from = isoOffset(RANGE_DAYS[r]);
     const to = todayIso();
-    const url = `/api/portfolio/${encodeURIComponent(stockId)}/prices?from=${from}&to=${to}`;
+    const url = `/api/portfolio/${encodeURIComponent(String(stockId))}/prices?from=${from}&to=${to}`;
     const cacheKey = `aistock:cache:${url}`;
     // Show cached prices instantly so the chart doesn't blank on range change.
     try {
       const raw = sessionStorage.getItem(cacheKey);
       if (raw) {
-        const parsed = JSON.parse(raw) as { ts: number; v: { rows: PriceRow[] } };
+        const parsed = JSON.parse(raw) as { ts?: number; v?: { rows?: unknown } };
+        const cachedRows = normalizePriceRows(parsed?.v?.rows);
         // Use cached data if < 5 minutes old; otherwise still show stale + refetch.
-        if (parsed?.v?.rows) {
-          setPrices(parsed.v.rows);
-          if (Date.now() - parsed.ts < 5 * 60_000) {
+        if (cachedRows.length > 0) {
+          setPrices(cachedRows);
+          if (typeof parsed?.ts === 'number' && Date.now() - parsed.ts < 5 * 60_000) {
             setLoadingPrices(false);
             return;
           }
@@ -168,10 +312,16 @@ export function PortfolioClient() {
         return;
       }
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const j = (await res.json()) as { rows: PriceRow[] };
-      setPrices(j.rows ?? []);
+      const j = (await res.json()) as { rows?: unknown };
+      // CRITICAL: postgres `numeric` columns roundtrip as strings — coerce
+      // here so render-time `close.toFixed(2)` etc. never sees a string.
+      const normRows = normalizePriceRows(j?.rows);
+      setPrices(normRows);
       try {
-        sessionStorage.setItem(cacheKey, JSON.stringify({ ts: Date.now(), v: j }));
+        sessionStorage.setItem(
+          cacheKey,
+          JSON.stringify({ ts: Date.now(), v: { rows: normRows } }),
+        );
       } catch {
         /* quota */
       }
@@ -183,7 +333,7 @@ export function PortfolioClient() {
   }, []);
 
   useEffect(() => {
-    if (!selectedId) {
+    if (selectedId == null) {
       setPrices([]);
       return;
     }
@@ -205,18 +355,20 @@ export function PortfolioClient() {
         }),
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const j = (await res.json()) as { stock: Stock };
+      const j = (await res.json()) as { stock?: unknown };
+      const added = normalizeStock(j?.stock);
+      if (!added) throw new Error('add: malformed response');
       setStocks((prev) => {
-        if (prev.some((s) => s.id === j.stock.id)) return prev;
-        return [...prev, j.stock];
+        if (prev.some((s) => s.id === added.id)) return prev;
+        return [...prev, added];
       });
-      setSelectedId(j.stock.id);
+      setSelectedId(added.id);
       // Auto-fetch prices in the background so the chart appears without
       // requiring a manual "Refresh data" click.
-      void fetch(`/api/portfolio/${encodeURIComponent(j.stock.id)}/ingest`, {
+      void fetch(`/api/portfolio/${encodeURIComponent(String(added.id))}/ingest`, {
         method: 'POST',
       })
-        .then(() => loadPrices(j.stock.id, range))
+        .then(() => loadPrices(added.id, range))
         .catch(() => undefined);
     } catch (e) {
       setListErr(e instanceof Error ? e.message : 'Failed to add');
@@ -225,7 +377,7 @@ export function PortfolioClient() {
     }
   }
 
-  async function removeStock(id: string) {
+  async function removeStock(id: number) {
     setDeletingId(id);
     try {
       const res = await fetch('/api/portfolio', {
@@ -252,12 +404,14 @@ export function PortfolioClient() {
     setIngesting(true);
     setIngestMsg(null);
     try {
-      const res = await fetch(`/api/portfolio/${encodeURIComponent(selected.id)}/ingest`, {
-        method: 'POST',
-      });
+      const res = await fetch(
+        `/api/portfolio/${encodeURIComponent(String(selected.id))}/ingest`,
+        { method: 'POST' },
+      );
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const j = (await res.json()) as { upserted: number };
-      setIngestMsg(`Upserted ${j.upserted} row${j.upserted === 1 ? '' : 's'}`);
+      const j = (await res.json()) as { upserted?: unknown };
+      const upserted = typeof j?.upserted === 'number' ? j.upserted : 0;
+      setIngestMsg(`Upserted ${upserted} row${upserted === 1 ? '' : 's'}`);
       await loadPrices(selected.id, range);
     } catch (e) {
       setIngestMsg(e instanceof Error ? e.message : 'Refresh failed');
@@ -267,14 +421,25 @@ export function PortfolioClient() {
   }
 
   const chartPoints: PricePoint[] = useMemo(
-    () => prices.map((p) => ({ date: p.date, close: p.close })),
+    () =>
+      prices
+        .filter((p) => Number.isFinite(p.close))
+        .map((p) => ({ date: p.date, close: p.close })),
     [prices],
   );
 
   const last = prices.length > 0 ? prices[prices.length - 1] : null;
   const first = prices.length > 0 ? prices[0] : null;
-  const delta = last && first ? last.close - first.close : null;
-  const deltaPct = last && first && first.close !== 0 ? (delta! / first.close) * 100 : null;
+  // Guard every arithmetic op — `close` is the field most likely to be missing
+  // or non-finite after a partial ingest. Without these guards a single bad
+  // row crashes the whole page.
+  const lastClose = last && Number.isFinite(last.close) ? last.close : null;
+  const firstClose = first && Number.isFinite(first.close) ? first.close : null;
+  const delta = lastClose != null && firstClose != null ? lastClose - firstClose : null;
+  const deltaPct =
+    delta != null && firstClose != null && firstClose !== 0
+      ? (delta / firstClose) * 100
+      : null;
 
   return (
     <div className="flex h-full flex-col md:flex-row">
@@ -328,7 +493,8 @@ export function PortfolioClient() {
                 <div className="flex items-baseline gap-3">
                   <h1 className="truncate text-lg font-semibold">{selected.symbol}</h1>
                   <span className="text-xs text-muted-foreground">
-                    {selected.exchange} · {selected.currency}
+                    {selected.exchange}
+                    {selected.currency ? ` · ${selected.currency}` : ''}
                   </span>
                 </div>
                 <div className="truncate text-sm text-muted-foreground">{selected.name}</div>
@@ -359,12 +525,12 @@ export function PortfolioClient() {
 
             <div className="flex-1 overflow-auto p-6">
               <div className="mb-4 flex items-baseline gap-4">
-                {last ? (
+                {lastClose != null ? (
                   <>
                     <div className="text-2xl font-semibold tabular-nums">
-                      {last.close.toFixed(2)}
+                      {lastClose.toFixed(2)}
                     </div>
-                    {delta !== null && deltaPct !== null ? (
+                    {delta != null && deltaPct != null ? (
                       <div
                         className={cn(
                           'text-sm tabular-nums',
@@ -437,17 +603,18 @@ function StockRow({
   stock: Stock;
   active: boolean;
   deleting: boolean;
-  onSelect: (id: string) => void;
-  onRemove: (id: string) => void;
+  onSelect: (id: number) => void;
+  onRemove: (id: number) => void;
 }) {
   // Pre-warm the default 6M view (matches the initial Range state). If the
   // user has 1M selected the hover prefetch is "wasted" but only by a handful
   // of KB, and the explicit click still hits its own cache key.
   const from = isoOffset(RANGE_DAYS['6M']);
   const to = todayIso();
+  const idStr = String(stock.id);
   const prefetchUrls = [
-    `/api/portfolio/${encodeURIComponent(stock.id)}/prices?from=${from}&to=${to}`,
-    `/api/stocks/${encodeURIComponent(stock.id)}/db-snapshot`,
+    `/api/portfolio/${encodeURIComponent(idStr)}/prices?from=${from}&to=${to}`,
+    `/api/stocks/${encodeURIComponent(idStr)}/db-snapshot`,
   ];
   const handlers = usePrefetchHandlers(prefetchUrls);
   return (
