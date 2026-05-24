@@ -206,6 +206,26 @@ async function recordAttemptAudit(
 // ---------- Handler ----------
 
 export async function POST(req: NextRequest) {
+  // TRACE marker (echoed in headers): bump this string on every diagnostic
+  // commit so we can curl-verify the deploy actually landed. If the response
+  // doesn't include `x-chat-trace`, prod is serving a stale build.
+  const TRACE = 'v10-rejection-catch';
+  // ABSOLUTE TOP guard: if `?trace=1` is in the URL, short-circuit with a
+  // synchronous JSON response that proves the handler is being invoked and
+  // the deployed code is the latest. Avoids any DB / parsing / import paths
+  // so a module-init crash elsewhere can't mask the trace.
+  if (req.nextUrl.searchParams.get('trace') === '1') {
+    return new NextResponse(
+      JSON.stringify({ ok: true, trace: TRACE, ts: new Date().toISOString() }),
+      {
+        status: 200,
+        headers: {
+          'content-type': 'application/json; charset=utf-8',
+          'x-chat-trace': TRACE,
+        },
+      },
+    );
+  }
   // Tiny per-phase wall-clock log so production slowness becomes diagnosable
   // from Vercel logs without having to attach a profiler. Each phase fires
   // once per request; the cumulative time tells us which step is the actual
