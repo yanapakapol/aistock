@@ -7,6 +7,7 @@ import { Select } from '@/components/ui/select';
 import { cn } from '@/lib/utils';
 import { SearchCombobox, type SearchResult } from '@/components/portfolio/search-combobox';
 import { PriceChart, type PricePoint } from '@/components/portfolio/price-chart';
+import { usePrefetchHandlers } from '@/components/prefetch-link';
 
 interface Stock {
   id: string;
@@ -255,40 +256,16 @@ export function PortfolioClient() {
             </div>
           ) : (
             <ul>
-              {stocks.map((s) => {
-                const active = s.id === selectedId;
-                return (
-                  <li key={s.id}>
-                    <div
-                      className={cn(
-                        'group flex items-center gap-2 border-b border-border/60 px-3 py-2',
-                        active && 'bg-accent',
-                      )}
-                    >
-                      <button
-                        type="button"
-                        onClick={() => setSelectedId(s.id)}
-                        className="min-w-0 flex-1 text-left"
-                      >
-                        <div className="truncate text-sm font-medium">{s.symbol}</div>
-                        <div className="truncate text-xs text-muted-foreground">
-                          {s.name}
-                          <span className="ml-1">· {s.exchange}</span>
-                        </div>
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => void removeStock(s.id)}
-                        disabled={deletingId === s.id}
-                        title="Remove"
-                        className="rounded-md p-1 text-muted-foreground opacity-0 transition hover:bg-background hover:text-red-500 group-hover:opacity-100 disabled:opacity-50"
-                      >
-                        <Trash2 className="h-3.5 w-3.5" />
-                      </button>
-                    </div>
-                  </li>
-                );
-              })}
+              {stocks.map((s) => (
+                <StockRow
+                  key={s.id}
+                  stock={s}
+                  active={s.id === selectedId}
+                  deleting={deletingId === s.id}
+                  onSelect={setSelectedId}
+                  onRemove={removeStock}
+                />
+              ))}
             </ul>
           )}
         </div>
@@ -402,5 +379,69 @@ export function PortfolioClient() {
         )}
       </section>
     </div>
+  );
+}
+
+/**
+ * One row in the watchlist sidebar. Pulled out so we can call
+ * `usePrefetchHandlers` per-stock (hooks-in-a-loop is fine when the loop
+ * always renders one component per iteration). Hovering / touching the row
+ * warms BOTH the price series for the default 6M range AND the DB snapshot,
+ * so clicking the row paints from cache without a network round-trip.
+ */
+function StockRow({
+  stock,
+  active,
+  deleting,
+  onSelect,
+  onRemove,
+}: {
+  stock: Stock;
+  active: boolean;
+  deleting: boolean;
+  onSelect: (id: string) => void;
+  onRemove: (id: string) => void;
+}) {
+  // Pre-warm the default 6M view (matches the initial Range state). If the
+  // user has 1M selected the hover prefetch is "wasted" but only by a handful
+  // of KB, and the explicit click still hits its own cache key.
+  const from = isoOffset(RANGE_DAYS['6M']);
+  const to = todayIso();
+  const prefetchUrls = [
+    `/api/portfolio/${encodeURIComponent(stock.id)}/prices?from=${from}&to=${to}`,
+    `/api/stocks/${encodeURIComponent(stock.id)}/db-snapshot`,
+  ];
+  const handlers = usePrefetchHandlers(prefetchUrls);
+  return (
+    <li>
+      <div
+        {...handlers}
+        className={cn(
+          'group flex items-center gap-2 border-b border-border/60 px-3 py-2',
+          active && 'bg-accent',
+        )}
+      >
+        <button
+          type="button"
+          onClick={() => onSelect(stock.id)}
+          className="min-w-0 flex-1 text-left"
+        >
+          <div className="truncate text-sm font-medium">{stock.symbol}</div>
+          <div className="truncate text-xs text-muted-foreground">
+            {stock.name}
+            <span className="ml-1">· {stock.exchange}</span>
+          </div>
+        </button>
+        <button
+          type="button"
+          onClick={() => onRemove(stock.id)}
+          disabled={deleting}
+          title="Remove"
+          className="rounded-md p-1 text-muted-foreground opacity-0 transition hover:bg-background hover:text-red-500 group-hover:opacity-100 disabled:opacity-50"
+        >
+          <Trash2 className="h-3.5 w-3.5" />
+        </button>
+      </div>
+    </li>
   );
 }

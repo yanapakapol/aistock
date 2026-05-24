@@ -85,6 +85,10 @@ async function writeCache(provider: Provider, models: ModelInfo[]) {
         })),
       );
     });
+    // Bust the in-memory readCache so the next /api/models call sees the new
+    // models immediately rather than waiting up to 60s for the unstable_cache
+    // TTL.
+    revalidateTag('llm-models');
   } catch {
     // Cache write is best-effort; ignore failures.
   }

@@ -9,6 +9,7 @@ import { Select } from '@/components/ui/select';
 import { HistoryPanel } from '@/components/chat/history-panel';
 import { DbSnapshotPanel } from '@/components/chat/db-snapshot-panel';
 import { EffortPicker, getStoredEffort, type Effort } from '@/components/chat/effort-picker';
+import { InlineModelPicker } from '@/components/chat/inline-model-picker';
 import { MessageList } from '@/components/chat/message-list';
 import { Composer } from '@/components/chat/composer';
 import { CostPill } from '@/components/chat/cost-pill';
@@ -318,9 +319,12 @@ export function ResearchClient({ stock }: { stock: StockLite | null }) {
               </option>
             ))}
           </Select>
-          <div className="hidden truncate text-xs text-muted-foreground sm:block">
-            {sel.provider} · {sel.modelId}
-          </div>
+          <InlineModelPicker
+            tab="research"
+            onChange={(s) =>
+              setSel({ provider: s.provider, modelId: s.modelId })
+            }
+          />
         </div>
         <div className="flex flex-wrap items-center justify-end gap-1.5 sm:gap-2">
           {stock && messages.length === 0 ? (

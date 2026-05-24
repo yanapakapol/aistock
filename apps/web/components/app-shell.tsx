@@ -6,6 +6,18 @@ import { useEffect, useState } from 'react';
 import { cn } from '@/lib/utils';
 import { Search, Sparkles, Clock, Wallet, Settings, Menu, X, LogOut, Users } from 'lucide-react';
 import { ThemeToggle } from '@/components/theme-toggle';
+import { PrefetchLink } from '@/components/prefetch-link';
+
+// Per-nav API endpoints to warm on hover. The page bundle is already
+// prefetched by Next; this prefetches the JSON payload the page mounts with,
+// so the destination feels instant. Endpoints not listed here just behave like
+// plain <Link>.
+const NAV_PREFETCH: Record<string, string[]> = {
+  '/portfolio': ['/api/portfolio'],
+  '/routines': ['/api/routines'],
+  '/research': ['/api/portfolio'],
+  '/analysis': ['/api/portfolio'],
+};
 
 const nav = [
   { href: '/research', label: 'Research', icon: Search },
@@ -77,9 +89,10 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           {nav.map(({ href, label, icon: Icon }) => {
             const active = pathname === href || pathname.startsWith(`${href}/`);
             return (
-              <Link
+              <PrefetchLink
                 key={href}
                 href={href}
+                prefetchUrls={NAV_PREFETCH[href]}
                 className={cn(
                   'flex items-center gap-2 rounded-md px-2 py-1.5 text-sm text-muted-foreground hover:bg-accent hover:text-foreground',
                   active && 'bg-accent text-foreground',
@@ -87,7 +100,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
               >
                 <Icon className="h-4 w-4" />
                 {label}
-              </Link>
+              </PrefetchLink>
             );
           })}
           {me?.isAdmin

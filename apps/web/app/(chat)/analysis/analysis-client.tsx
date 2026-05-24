@@ -14,6 +14,7 @@ import { useChatSession } from '@/components/chat/use-chat-session';
 import { useChatPersistence } from '@/components/chat/use-persisted-chat';
 import { usePendingChatLoad } from '@/components/chat/use-pending-load';
 import { EffortPicker, getStoredEffort, type Effort } from '@/components/chat/effort-picker';
+import { InlineModelPicker } from '@/components/chat/inline-model-picker';
 import { Button } from '@/components/ui/button';
 import { HistoryPanel } from '@/components/chat/history-panel';
 import { DbSnapshotPanel } from '@/components/chat/db-snapshot-panel';
@@ -253,15 +254,10 @@ export function AnalysisClient({ initialSymbol }: Props) {
           <StockSwitcher value={symbol ?? undefined} />
         </div>
         <div className="flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground sm:ml-auto sm:gap-3">
-          {model ? (
-            <span className="rounded-md border border-border px-2 py-1">
-              {model.provider} · {model.modelId}
-            </span>
-          ) : (
-            <span className="rounded-md border border-border px-2 py-1">
-              No model — set in Settings
-            </span>
-          )}
+          <InlineModelPicker
+            tab="analysis"
+            onChange={(sel) => setModel({ provider: sel.provider, modelId: sel.modelId })}
+          />
           <EffortPicker
             tab="analysis"
             onChange={(e) => {
