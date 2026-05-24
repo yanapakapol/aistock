@@ -1,0 +1,74 @@
+import { NextResponse, type NextRequest } from 'next/server';
+import { asc, eq } from 'drizzle-orm';
+import { db } from '@/lib/db/client';
+import { chats, chatMessages } from '@/lib/db/schema';
+
+export const runtime = 'nodejs';
+
+/** GET /api/chats/:id — full message list for a single chat, ascending by time. */
+export async function GET(
+  _req: NextRequest,
+  { params }: { params: Promise<{ id: string }> },
+) {
+  const { id: raw } = await params;
+  const id = Number(raw);
+  if (!Number.isFinite(id) || id <= 0) {
+    return NextResponse.json({ error: 'bad id' }, { status: 400 });
+  }
+  const [chat] = await db.select().from(chats).where(eq(chats.id, id)).limit(1);
+  if (!chat) return NextResponse.json({ error: 'not found' }, { status: 404 });
+  // The `parts` column was added after the initial schema snapshot. If the
+  // user hasn't re-run db:migrate yet, fall back to the legacy column set so
+  // chat history still works (just without rich tool-call replay).
+  let rows: unknown[] = [];
+  try {
+    rows = await db
+      .select({
+        id: chatMessages.id,
+        role: chatMessages.role,
+        contentMd: chatMessages.contentMd,
+        parts: chatMessages.parts,
+        toolCalls: chatMessages.toolCalls,
+        createdAt: chatMessages.createdAt,
+      })
+      .from(chatMessages)
+      .where(eq(chatMessages.chatId, id))
+      .orderBy(asc(chatMessages.createdAt));
+  } catch (err) {
+    const msg = (err as { message?: string }).message ?? '';
+    if (!/parts|column.*does not exist/i.test(msg)) {
+      console.error('[chats/:id GET] failed:', msg);
+      return NextResponse.json({ error: 'load failed', detail: msg }, { status: 500 });
+    }
+    console.warn('[chats/:id GET] `parts` column missing — run db:migrate. Falling back.');
+    rows = await db
+      .select({
+        id: chatMessages.id,
+        role: chatMessages.role,
+        contentMd: chatMessages.contentMd,
+        toolCalls: chatMessages.toolCalls,
+        createdAt: chatMessages.createdAt,
+      })
+      .from(chatMessages)
+      .where(eq(chatMessages.chatId, id))
+      .orderBy(asc(chatMessages.createdAt));
+  }
+  return NextResponse.json({ chat, messages: rows });
+}
+
+/** DELETE /api/chats/:id — cascade-deletes its messages via FK. */
+export async function DELETE(
+  req: NextRequest,
+  { params }: { params: Promise<{ id: string }> },
+) {
+  if (req.headers.get('sec-fetch-site') && req.headers.get('sec-fetch-site') !== 'same-origin') {
+    return NextResponse.json({ error: 'cross-origin denied' }, { status: 403 });
+  }
+  const { id: raw } = await params;
+  const id = Number(raw);
+  if (!Number.isFinite(id) || id <= 0) {
+    return NextResponse.json({ error: 'bad id' }, { status: 400 });
+  }
+  await db.delete(chats).where(eq(chats.id, id));
+  return NextResponse.json({ ok: true });
+}

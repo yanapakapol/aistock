@@ -1,0 +1,101 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 0 0% 100%;
+    --foreground: 240 10% 4%;
+    --muted: 240 5% 96%;
+    --muted-foreground: 240 4% 46%;
+    --border: 240 6% 90%;
+    --accent: 240 5% 96%;
+    --accent-foreground: 240 6% 10%;
+  }
+  .dark {
+    --background: 240 10% 4%;
+    --foreground: 0 0% 98%;
+    --muted: 240 4% 16%;
+    --muted-foreground: 240 5% 65%;
+    --border: 240 4% 16%;
+    --accent: 240 4% 16%;
+    --accent-foreground: 0 0% 98%;
+  }
+  html,
+  body {
+    height: 100%;
+    background: hsl(var(--background));
+    color: hsl(var(--foreground));
+  }
+}
+
+/* Themed scrollbar applied EVERYWHERE so the default chunky white bar never
+ * appears (was hideous in dark mode on the chat / panels). Works in
+ * Chromium-family + Firefox; Safari ignores `scrollbar-color` but the webkit
+ * rules below cover it. */
+*,
+*::before,
+*::after {
+  scrollbar-width: thin;
+  scrollbar-color: hsl(var(--muted-foreground) / 0.3) transparent;
+}
+*::-webkit-scrollbar {
+  height: 8px;
+  width: 8px;
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+*::-webkit-scrollbar-thumb {
+  background-color: hsl(var(--muted-foreground) / 0.25);
+  border-radius: 9999px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+*::-webkit-scrollbar-thumb:hover {
+  background-color: hsl(var(--muted-foreground) / 0.5);
+}
+*::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+/* Alias kept so any place that opts in explicitly still works. */
+.thin-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: hsl(var(--muted-foreground) / 0.3) transparent;
+}
+.thin-scroll::-webkit-scrollbar {
+  height: 6px;
+  width: 6px;
+}
+
+/* Indeterminate progress bar — slides a thin highlight across the track to
+ * show "something is happening" while we wait for a tool call to return. */
+@keyframes indeterminate-slide {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(400%);
+  }
+}
+.indeterminate-bar {
+  position: relative;
+  overflow: hidden;
+  background: hsl(var(--muted-foreground) / 0.15);
+}
+.indeterminate-bar::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 25%;
+  height: 100%;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    rgb(59 130 246 / 0.7),
+    transparent
+  );
+  animation: indeterminate-slide 1.2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}

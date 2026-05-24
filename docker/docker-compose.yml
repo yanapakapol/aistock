@@ -1,0 +1,50 @@
+name: aistock
+
+services:
+  db:
+    image: paradedb/paradedb:latest
+    # ParadeDB bundles Postgres 16 + pgvector + pg_search (BM25) + pg_ivm.
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: aistock
+      POSTGRES_PASSWORD: aistock
+      POSTGRES_DB: aistock
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "aistock", "-d", "aistock"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  app:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://aistock:aistock@db:5432/aistock
+      KEY_PROVIDER: ${KEY_PROVIDER:-docker-secret}
+      HOST: 0.0.0.0
+      PORT: 3000
+      NODE_ENV: production
+    ports:
+      - "127.0.0.1:3000:3000"
+    secrets:
+      - master_key
+    volumes:
+      - app-cache:/app/.next/cache
+
+volumes:
+  db-data:
+  app-cache:
+
+secrets:
+  master_key:
+    # Generate once: openssl rand -base64 32 > docker/secrets/master_key.txt
+    file: ./secrets/master_key.txt

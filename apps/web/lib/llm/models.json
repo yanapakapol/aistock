@@ -1,0 +1,60 @@
+{
+  "_meta": {
+    "verified": "2026-05",
+    "note": "Hardcoded fallback. Live /v1/models is queried first; this fills in pricing and capability flags which providers do not expose. Refresh via scripts/seed-models.ts."
+  },
+  "openai": {
+    "baseUrl": "https://api.openai.com/v1",
+    "listEndpoint": "https://api.openai.com/v1/models",
+    "models": [
+      { "id": "gpt-5.5", "context": 1048576, "input": 5.0, "output": 30.0, "tools": true, "reasoning": true },
+      { "id": "gpt-5.5-pro", "context": 1048576, "input": 30.0, "output": 180.0, "tools": true, "reasoning": true },
+      { "id": "gpt-5.4-mini", "context": 1048576, "input": 0.5, "output": 2.0, "tools": true, "reasoning": true }
+    ]
+  },
+  "anthropic": {
+    "baseUrl": "https://api.anthropic.com",
+    "listEndpoint": "https://api.anthropic.com/v1/models",
+    "models": [
+      { "id": "claude-opus-4-7", "context": 1000000, "input": 5.0, "output": 25.0, "tools": true, "reasoning": true },
+      { "id": "claude-sonnet-4-6", "context": 1000000, "input": 3.0, "output": 15.0, "tools": true, "reasoning": true },
+      { "id": "claude-haiku-4-5", "context": 200000, "input": 1.0, "output": 5.0, "tools": true, "reasoning": true }
+    ]
+  },
+  "google": {
+    "baseUrl": "https://generativelanguage.googleapis.com",
+    "listEndpoint": "https://generativelanguage.googleapis.com/v1beta/models",
+    "models": [
+      { "id": "gemini-3.1-pro", "context": 2000000, "input": 2.0, "output": 12.0, "tools": true, "reasoning": true },
+      { "id": "gemini-3.5-flash", "context": 1000000, "input": 1.5, "output": 9.0, "tools": true, "reasoning": true },
+      { "id": "gemini-3.1-flash-lite", "context": 1000000, "input": 0.25, "output": 1.5, "tools": true, "reasoning": false },
+      { "id": "gemini-2.5-flash-lite", "context": 1000000, "input": 0.1, "output": 0.4, "tools": true, "reasoning": false }
+    ]
+  },
+  "mistral": {
+    "baseUrl": "https://api.mistral.ai/v1",
+    "listEndpoint": "https://api.mistral.ai/v1/models",
+    "models": [
+      { "id": "mistral-large-2512", "context": 262144, "input": 0.5, "output": 1.5, "tools": true, "reasoning": false },
+      { "id": "mistral-medium-3", "context": 131072, "input": 0.4, "output": 2.0, "tools": true, "reasoning": false },
+      { "id": "mistral-small-latest", "context": 128000, "input": 0.1, "output": 0.3, "tools": true, "reasoning": false },
+      { "id": "codestral-latest", "context": 256000, "input": 0.3, "output": 0.9, "tools": true, "reasoning": false }
+    ]
+  },
+  "moonshot": {
+    "baseUrl": "https://api.moonshot.ai/v1",
+    "listEndpoint": "https://api.moonshot.ai/v1/models",
+    "models": [
+      { "id": "kimi-k2.6", "context": 262144, "input": 0.73, "output": 3.49, "tools": true, "reasoning": false },
+      { "id": "kimi-k2.5", "context": 262144, "input": 0.4, "output": 1.9, "tools": true, "reasoning": false }
+    ]
+  },
+  "deepseek": {
+    "baseUrl": "https://api.deepseek.com",
+    "listEndpoint": "https://api.deepseek.com/models",
+    "models": [
+      { "id": "deepseek-v4-pro", "context": 1000000, "input": 1.74, "output": 3.48, "tools": true, "reasoning": true },
+      { "id": "deepseek-v4-flash", "context": 1000000, "input": 0.14, "output": 0.28, "tools": true, "reasoning": false }
+    ]
+  }
+}

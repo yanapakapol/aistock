@@ -1,0 +1,13 @@
+node_modules
+.next
+out
+dist
+.env
+.env.*
+!.env.example
+.DS_Store
+*.log
+.turbo
+.vercel
+apps/web/next-env.d.ts
+apps/web/.next
