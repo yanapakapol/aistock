@@ -386,8 +386,24 @@ export async function POST(req: NextRequest) {
   // Per-provider `loadApiKey` calls each hit a DB row + decrypt; running the
   // PROVIDERS array sequentially used to add ~6× one row-trip of latency.
   // Promise.all collapses that to a single round-trip.
+  //
+  // CRITICAL: each loadApiKey is wrapped in its own try/catch. A throw from
+  // ANY single provider (decryption failure on a stale ciphertext, DB hiccup,
+  // etc.) would otherwise reject the Promise.all — and if the rejection
+  // landed before a `catch` handler was attached, Node 20's default
+  // `--unhandled-rejections=throw` would kill the function with no body
+  // → the "empty 500" prod bug. Per-provider catch keeps one bad row from
+  // taking down the whole chat.
   const providerKeysP = Promise.all(
-    PROVIDERS.map(async (p) => ({ p, key: await loadApiKey(p) })),
+    PROVIDERS.map(async (p) => {
+      try {
+        const key = await loadApiKey(p);
+        return { p, key };
+      } catch (err) {
+        console.error(`[chat] loadApiKey(${p}) failed:`, sanitizeError(err));
+        return { p, key: null };
+      }
+    }),
   );
 
   // Stock-context select (ownership-scoped). Only runs when stockId was
