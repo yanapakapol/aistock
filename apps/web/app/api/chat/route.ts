@@ -212,12 +212,20 @@ export async function POST(req: NextRequest) {
   // hot-path dominator (cold-start bundle, DB warmup, LLM first-byte, etc.).
   const t0 = Date.now();
   let lastT = t0;
+  // `currentPhase` is also used by the top-level catch to attach a `phase`
+  // field to the JSON error response — invaluable for diagnosing prod 500s
+  // because Vercel's default behavior for an unhandled throw is an empty
+  // body, leaving the client with only the status code.
+  let currentPhase = 'init';
   const phase = (name: string) => {
     const now = Date.now();
+    currentPhase = name;
     // eslint-disable-next-line no-console
     console.log(`[chat] +${now - lastT}ms / ${now - t0}ms total → ${name}`);
     lastT = now;
   };
+
+  try {
 
   // CSRF: only allow same-origin browser calls.
   const sfs = req.headers.get('sec-fetch-site');
@@ -873,6 +881,24 @@ export async function POST(req: NextRequest) {
     { error: sanitizeError(lastError ?? new Error('all providers failed')) },
     { status: lastStatus || 502 },
   );
+  } catch (err) {
+    // LAST-LINE BACKSTOP. Any throw that escapes the per-attempt try/catch
+    // and the per-phase await chains lands here. Without this, Next.js would
+    // emit an empty-body 500 and the user sees only "chat failed" with no
+    // diagnostic. We surface the phase (the most recently logged step) plus
+    // the sanitized error message so the next debugger has a thread to pull.
+    const detail = sanitizeError(err);
+    // Console with stack — sanitizeError drops the stack on purpose so it
+    // doesn't reach the client, but we want it in Vercel logs.
+    console.error(
+      `[chat] uncaught in phase=${currentPhase}:`,
+      err instanceof Error ? err.stack ?? err.message : err,
+    );
+    return NextResponse.json(
+      { error: detail, phase: currentPhase },
+      { status: typeof detail.status === 'number' ? detail.status : 500 },
+    );
+  }
 }
 
 // ---------- DB helpers ----------
