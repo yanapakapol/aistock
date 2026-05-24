@@ -67,6 +67,11 @@ export function PortfolioClient() {
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       const j = (await r.json()) as { stocks: Stock[] };
       setStocks(j.stocks ?? []);
+      try {
+        sessionStorage.setItem('aistock:cache:/api/portfolio', JSON.stringify({ ts: Date.now(), v: j }));
+      } catch {
+        /* ignore */
+      }
       setSelectedId((prev) => {
         if (prev && j.stocks.some((s) => s.id === prev)) return prev;
         return j.stocks[0]?.id ?? null;
@@ -78,7 +83,22 @@ export function PortfolioClient() {
     }
   }, []);
 
+  // Hydrate from sessionStorage instantly so the watchlist never appears empty
+  // on first paint while waiting for a Neon cold-start.
   useEffect(() => {
+    try {
+      const raw = sessionStorage.getItem('aistock:cache:/api/portfolio');
+      if (raw) {
+        const parsed = JSON.parse(raw) as { v: { stocks: Stock[] } };
+        if (parsed?.v?.stocks?.length) {
+          setStocks(parsed.v.stocks);
+          setLoadingList(false);
+          setSelectedId((prev) => prev ?? parsed.v.stocks[0]?.id ?? null);
+        }
+      }
+    } catch {
+      /* ignore */
+    }
     void loadStocks();
   }, [loadStocks]);
 

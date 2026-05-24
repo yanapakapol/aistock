@@ -1,8 +1,9 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import { useRouter, useSearchParams, usePathname } from 'next/navigation';
 import { Select } from '@/components/ui/select';
+import { useCachedJson } from '@/lib/client/use-cached-json';
 
 interface PortfolioStock {
   id: number;
@@ -27,34 +28,13 @@ export function StockSwitcher({ value, onChange, className }: Props) {
   const router = useRouter();
   const pathname = usePathname();
   const sp = useSearchParams();
-  const [stocks, setStocks] = useState<PortfolioStock[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [err, setErr] = useState<string | null>(null);
-
-  useEffect(() => {
-    let cancelled = false;
-    setLoading(true);
-    fetch('/api/portfolio')
-      .then((r) => {
-        if (!r.ok) throw new Error(`HTTP ${r.status}`);
-        return r.json() as Promise<{ stocks: PortfolioStock[] }>;
-      })
-      .then((j) => {
-        if (cancelled) return;
-        setStocks(j.stocks ?? []);
-        setErr(null);
-      })
-      .catch((e) => {
-        if (cancelled) return;
-        setErr((e as Error).message);
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+  // SWR: instant from sessionStorage, refresh in background.
+  const { data, loading, error } = useCachedJson<{ stocks: PortfolioStock[] }>(
+    '/api/portfolio',
+    { ttlMs: 30_000 },
+  );
+  const stocks = data?.stocks ?? [];
+  const err = error;
 
   function setSymbol(symbol: string) {
     const stock = stocks.find((s) => s.symbol === symbol);
@@ -65,10 +45,10 @@ export function StockSwitcher({ value, onChange, className }: Props) {
     onChange?.(stock);
   }
 
-  if (loading) {
+  if (loading && stocks.length === 0) {
     return <div className="text-xs text-muted-foreground">Loading portfolio…</div>;
   }
-  if (err) {
+  if (err && stocks.length === 0) {
     return <div className="text-xs text-red-500">Portfolio: {err}</div>;
   }
   if (stocks.length === 0) {

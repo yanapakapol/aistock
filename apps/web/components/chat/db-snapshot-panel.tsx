@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { X, RefreshCw, Database } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import {
@@ -48,6 +48,7 @@ export function DbSnapshotPanel({ stockId, open, onClose }: Props) {
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
+  const cacheKey = stockId ? `aistock:cache:/api/stocks/${stockId}/db-snapshot` : null;
   const refresh = useCallback(async () => {
     if (!stockId) return;
     setLoading(true);
@@ -57,16 +58,38 @@ export function DbSnapshotPanel({ stockId, open, onClose }: Props) {
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       const j = (await r.json()) as Snapshot;
       setSnap(j);
+      if (cacheKey) {
+        try {
+          sessionStorage.setItem(cacheKey, JSON.stringify({ ts: Date.now(), v: j }));
+        } catch {
+          /* ignore */
+        }
+      }
     } catch (e) {
       setErr((e as Error).message);
     } finally {
       setLoading(false);
     }
-  }, [stockId]);
+  }, [stockId, cacheKey]);
 
+  // Show cached snapshot instantly, refetch in background.
+  const lastStockRef = useRef<number | null | undefined>(null);
   useEffect(() => {
-    if (open) void refresh();
-  }, [open, refresh]);
+    if (!open) return;
+    if (cacheKey && lastStockRef.current !== stockId) {
+      lastStockRef.current = stockId;
+      try {
+        const raw = sessionStorage.getItem(cacheKey);
+        if (raw) {
+          const parsed = JSON.parse(raw) as { v: Snapshot };
+          if (parsed?.v) setSnap(parsed.v);
+        }
+      } catch {
+        /* ignore */
+      }
+    }
+    void refresh();
+  }, [open, refresh, cacheKey, stockId]);
 
   if (!open) return null;
 

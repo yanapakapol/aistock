@@ -28,7 +28,7 @@ function requireSameOrigin(req: NextRequest) {
 
 export async function GET() {
   const rows = await listStocks();
-  return NextResponse.json({ stocks: rows });
+  return NextResponse.json({ stocks: rows }, { headers: SWR_HEADERS });
 }
 
 export async function POST(req: NextRequest) {
