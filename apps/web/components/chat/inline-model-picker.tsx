@@ -20,6 +20,25 @@ const LS_KEY = (tab: string) => `aistock:model:${tab}`;
  * Click the badge → expands to two dropdowns (provider, model) inline.
  * Click outside → collapses.
  */
+// Preferred default order: free tier / cheapest first. Mistral wins.
+const DEFAULT_PRIORITY: Provider[] = [
+  'mistral',
+  'google',
+  'deepseek',
+  'moonshot',
+  'openai',
+  'anthropic',
+];
+
+const DEFAULT_MODEL_FOR: Record<Provider, string> = {
+  mistral: 'mistral-large-2512',
+  google: 'gemini-3.5-flash',
+  deepseek: 'deepseek-v4-flash',
+  moonshot: 'kimi-k2.6',
+  openai: 'gpt-5.5',
+  anthropic: 'claude-sonnet-4-6',
+};
+
 export function InlineModelPicker({
   tab,
   onChange,
@@ -27,28 +46,69 @@ export function InlineModelPicker({
   tab: 'research' | 'analysis' | 'routines';
   onChange?: (sel: Selection) => void;
 }) {
-  const [sel, setSel] = useState<Selection>({
-    provider: 'anthropic',
-    modelId: 'claude-sonnet-4-6',
-  });
+  // Sentinel — null means "still picking a sensible default". We avoid
+  // hard-coding claude-sonnet-4-6 because most users only have a Mistral key.
+  const [sel, setSel] = useState<Selection | null>(null);
   const [models, setModels] = useState<Record<Provider, ModelInfo[]>>(
     () => ({}) as Record<Provider, ModelInfo[]>,
   );
   const [open, setOpen] = useState(false);
 
-  // Hydrate from localStorage.
+  // Hydrate: prefer saved selection; else first configured provider in priority
+  // order; else fall back to Mistral default.
   useEffect(() => {
-    try {
-      const raw = localStorage.getItem(LS_KEY(tab));
-      if (raw) setSel(JSON.parse(raw) as Selection);
-    } catch {
-      /* ignore */
+    let cancelled = false;
+    async function pickDefault() {
+      // 1. localStorage wins.
+      try {
+        const raw = localStorage.getItem(LS_KEY(tab));
+        if (raw) {
+          const saved = JSON.parse(raw) as Selection;
+          if (saved?.provider && saved.modelId && !cancelled) {
+            setSel(saved);
+            return;
+          }
+        }
+      } catch {
+        /* ignore */
+      }
+      // 2. Ask the server which providers have a key configured.
+      try {
+        const r = await fetch('/api/keys');
+        const j = (await r.json()) as { llm?: Provider[] };
+        const configured = new Set(j.llm ?? []);
+        const picked = DEFAULT_PRIORITY.find((p) => configured.has(p)) ?? 'mistral';
+        const next: Selection = {
+          provider: picked,
+          modelId: DEFAULT_MODEL_FOR[picked],
+        };
+        if (!cancelled) {
+          setSel(next);
+          try {
+            localStorage.setItem(LS_KEY(tab), JSON.stringify(next));
+          } catch {
+            /* quota */
+          }
+          onChange?.(next);
+        }
+      } catch {
+        if (!cancelled) {
+          const fallback: Selection = { provider: 'mistral', modelId: 'mistral-large-2512' };
+          setSel(fallback);
+          onChange?.(fallback);
+        }
+      }
     }
+    void pickDefault();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tab]);
 
   // Lazy-load model list when opened.
   useEffect(() => {
-    if (!open) return;
+    if (!open || !sel) return;
     if (models[sel.provider]?.length) return;
     void fetch(`/api/models?provider=${sel.provider}`)
       .then((r) => r.json())
@@ -56,9 +116,10 @@ export function InlineModelPicker({
         setModels((prev) => ({ ...prev, [sel.provider]: j.models ?? [] })),
       )
       .catch(() => undefined);
-  }, [open, sel.provider, models]);
+  }, [open, sel, models]);
 
   function update(patch: Partial<Selection>) {
+    if (!sel) return;
     const next: Selection = { ...sel, ...patch };
     if (patch.provider && patch.provider !== sel.provider) {
       // Lazy-load the new provider's model list immediately.
@@ -89,6 +150,14 @@ export function InlineModelPicker({
       /* quota */
     }
     onChange?.(next);
+  }
+
+  if (!sel) {
+    return (
+      <span className="inline-flex items-center gap-1 rounded-md border border-border bg-muted/30 px-2 py-0.5 text-[10px] text-muted-foreground">
+        loading model…
+      </span>
+    );
   }
 
   if (!open) {
