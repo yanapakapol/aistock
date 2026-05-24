@@ -217,8 +217,8 @@ export function PortfolioClient() {
   const deltaPct = last && first && first.close !== 0 ? (delta! / first.close) * 100 : null;
 
   return (
-    <div className="flex h-full">
-      <aside className="flex w-64 shrink-0 flex-col border-r border-border bg-muted/20">
+    <div className="flex h-full flex-col md:flex-row">
+      <aside className="flex w-full shrink-0 flex-col border-b border-border bg-muted/20 md:w-64 md:border-b-0 md:border-r">
         <div className="border-b border-border px-4 py-3">
           <h2 className="text-sm font-semibold">Watchlist</h2>
           <p className="text-xs text-muted-foreground">{stocks.length} symbol{stocks.length === 1 ? '' : 's'}</p>
@@ -273,7 +273,7 @@ export function PortfolioClient() {
         </div>
       </aside>
 
-      <section className="flex w-80 shrink-0 flex-col border-r border-border">
+      <section className="flex w-full shrink-0 flex-col border-b border-border md:w-80 md:border-b-0 md:border-r">
         <div className="border-b border-border px-4 py-3">
           <h2 className="text-sm font-semibold">Add stock</h2>
           <p className="text-xs text-muted-foreground">Search across SH, SZ, HK, KR, JP, TH, US, LSE, Xetra, Euronext.</p>
@@ -287,8 +287,8 @@ export function PortfolioClient() {
       <section className="flex min-w-0 flex-1 flex-col overflow-hidden">
         {selected ? (
           <>
-            <div className="flex items-start justify-between gap-4 border-b border-border px-6 py-4">
-              <div className="min-w-0">
+            <div className="flex flex-wrap items-start justify-between gap-3 border-b border-border px-4 py-3 sm:gap-4 sm:px-6 sm:py-4">
+              <div className="min-w-0 flex-1">
                 <div className="flex items-baseline gap-3">
                   <h1 className="truncate text-lg font-semibold">{selected.symbol}</h1>
                   <span className="text-xs text-muted-foreground">
@@ -297,7 +297,7 @@ export function PortfolioClient() {
                 </div>
                 <div className="truncate text-sm text-muted-foreground">{selected.name}</div>
               </div>
-              <div className="flex items-center gap-2">
+              <div className="flex flex-wrap items-center gap-2">
                 <Select
                   value={range}
                   onChange={(e) => setRange(e.target.value as Range)}

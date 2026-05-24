@@ -297,11 +297,11 @@ export function ResearchClient({ stock }: { stock: StockLite | null }) {
 
   return (
     <div className="flex h-full flex-col">
-      <header className="flex items-center justify-between gap-3 border-b border-border px-6 py-3">
-        <div className="flex min-w-0 items-center gap-3">
+      <header className="flex flex-wrap items-center justify-between gap-2 border-b border-border px-3 py-2 sm:px-6 sm:py-3">
+        <div className="flex min-w-0 flex-1 flex-wrap items-center gap-2 sm:gap-3">
           <div className="text-sm font-semibold tracking-tight">Research</div>
           <Select
-            className="w-72"
+            className="w-full min-w-0 max-w-xs sm:w-72"
             value={stock ? String(stock.id) : ''}
             onChange={(e) => {
               const id = e.target.value;
@@ -318,11 +318,11 @@ export function ResearchClient({ stock }: { stock: StockLite | null }) {
               </option>
             ))}
           </Select>
-          <div className="truncate text-xs text-muted-foreground">
+          <div className="hidden truncate text-xs text-muted-foreground sm:block">
             {sel.provider} · {sel.modelId}
           </div>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center justify-end gap-1.5 sm:gap-2">
           {stock && messages.length === 0 ? (
             <Button size="sm" onClick={startResearchPlan} disabled={!hydrated}>
               Quick plan

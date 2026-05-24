@@ -46,7 +46,7 @@ export function Composer({
         e.preventDefault();
         submit();
       }}
-      className="border-t border-border bg-background px-6 py-4"
+      className="border-t border-border bg-background px-3 py-3 sm:px-6 sm:py-4"
     >
       <div className="mx-auto flex max-w-3xl items-end gap-2">
         <textarea

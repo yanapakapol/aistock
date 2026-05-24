@@ -102,7 +102,7 @@ export function MessageList({ messages, streaming }: Props) {
         <button
           type="button"
           onClick={scrollToBottom}
-          className="pointer-events-auto fixed bottom-24 left-1/2 z-20 -translate-x-1/2 rounded-full border border-border bg-background/90 px-3 py-1 text-[11px] text-foreground shadow-sm backdrop-blur hover:bg-accent"
+          className="pointer-events-auto fixed bottom-36 left-1/2 z-20 -translate-x-1/2 rounded-full border border-border bg-background/90 px-3 py-1 text-[11px] text-foreground shadow-sm backdrop-blur hover:bg-accent sm:bottom-28"
         >
           ↓ jump to latest
         </button>
