@@ -59,6 +59,19 @@ export async function POST(req: NextRequest) {
   const dailyUsdCap = defaults?.usdCap ?? HARD_DEFAULT_USD_CAP;
   const expiresAt = new Date(Date.now() + GUEST_TTL_DAYS * 24 * 60 * 60 * 1000);
 
+  // Pre-check for an existing username so we can return a clean 409 instead
+  // of relying on the INSERT to fail. Drizzle wraps the postgres-js unique-
+  // violation error in a way that hides the `code` (23505), so catching it
+  // by error code alone is fragile.
+  const [taken] = await db
+    .select({ id: users.id })
+    .from(users)
+    .where(eq(users.username, username))
+    .limit(1);
+  if (taken) {
+    return NextResponse.json({ error: 'username already taken' }, { status: 409 });
+  }
+
   const passwordHash = await hashPassword(password);
   try {
     const [created] = await db
@@ -85,10 +98,17 @@ export async function POST(req: NextRequest) {
       },
     });
   } catch (err) {
-    const msg = (err as { message?: string })?.message ?? '';
-    if (/unique|duplicate/i.test(msg)) {
+    // Postgres unique_violation code. More reliable than parsing the message,
+    // which Drizzle wraps as "Failed query: insert ..." and doesn't surface
+    // the underlying "duplicate key" text.
+    const pgErr = err as { code?: string; message?: string };
+    if (pgErr?.code === '23505') {
       return NextResponse.json({ error: 'username already taken' }, { status: 409 });
     }
-    return NextResponse.json({ error: 'register failed', detail: msg }, { status: 500 });
+    // Don't echo the SQL / param list (contains the bcrypt hash). Strip
+    // anything after the first newline so we keep the headline but drop
+    // the parameter dump.
+    const safeDetail = (pgErr?.message ?? '').split('\n')[0].slice(0, 200);
+    return NextResponse.json({ error: 'register failed', detail: safeDetail }, { status: 500 });
   }
 }

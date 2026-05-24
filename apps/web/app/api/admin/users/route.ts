@@ -1,6 +1,6 @@
 import { NextResponse, type NextRequest } from 'next/server';
 import { z } from 'zod';
-import { sql } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
 import { db } from '@/lib/db/client';
 import { users } from '@/lib/db/schema';
 import { getCurrentUser } from '@/lib/auth/session';
@@ -124,6 +124,16 @@ export async function POST(req: NextRequest) {
   const expiresAt =
     body.role === 'guest' ? new Date(Date.now() + ttlDays * 24 * 60 * 60 * 1000) : null;
 
+  // Pre-check duplicate (Drizzle hides the postgres 23505 error code).
+  const [taken] = await db
+    .select({ id: users.id })
+    .from(users)
+    .where(eq(users.username, body.username))
+    .limit(1);
+  if (taken) {
+    return NextResponse.json({ error: 'username already taken' }, { status: 409 });
+  }
+
   const passwordHash = await hashPassword(body.password);
   try {
     const [created] = await db
@@ -140,10 +150,11 @@ export async function POST(req: NextRequest) {
       .returning({ id: users.id, username: users.username, role: users.role });
     return NextResponse.json({ ok: true, user: created });
   } catch (err) {
-    const msg = (err as { message?: string })?.message ?? '';
-    if (/unique|duplicate/i.test(msg)) {
+    const pgErr = err as { code?: string; message?: string };
+    if (pgErr?.code === '23505') {
       return NextResponse.json({ error: 'username already taken' }, { status: 409 });
     }
-    return NextResponse.json({ error: 'create failed', detail: msg }, { status: 500 });
+    const safeDetail = (pgErr?.message ?? '').split('\n')[0].slice(0, 200);
+    return NextResponse.json({ error: 'create failed', detail: safeDetail }, { status: 500 });
   }
 }

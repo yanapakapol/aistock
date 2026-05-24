@@ -29,19 +29,35 @@ export function GuestForm() {
     }
     setBusy(true);
     try {
-      const r = await fetch('/api/auth/register-guest', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ username, password }),
-      });
-      const j = (await r.json().catch(() => ({}))) as {
-        ok?: boolean;
-        error?: string;
-        detail?: string;
-      };
+      let r: Response;
+      try {
+        r = await fetch('/api/auth/register-guest', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ username, password }),
+        });
+      } catch (netErr) {
+        // Network-level failure (DNS, abort, CORS preflight reject, etc.) —
+        // surface the actual message so the button click doesn't silently
+        // appear to do nothing.
+        setErr(`network error: ${(netErr as Error).message ?? 'fetch failed'}`);
+        return;
+      }
+      // Parse body once. Some failure modes (middleware 401, edge runtime
+      // 500) return plain text instead of JSON, so we read text first and
+      // try to JSON.parse for a friendlier message when possible.
+      const raw = await r.text().catch(() => '');
+      let j: { ok?: boolean; error?: string; detail?: string } = {};
+      try {
+        j = raw ? (JSON.parse(raw) as typeof j) : {};
+      } catch {
+        // Plain-text body — pass it through as the error message.
+        if (!r.ok) {
+          setErr(`HTTP ${r.status}: ${raw.slice(0, 200) || r.statusText}`);
+          return;
+        }
+      }
       if (!r.ok || !j.ok) {
-        // Show server-side detail (e.g. "column does not exist") so the user
-        // can report something actionable instead of a generic failure.
         const parts = [j.error ?? `HTTP ${r.status}`, j.detail].filter(Boolean);
         setErr(parts.join(' — '));
         return;

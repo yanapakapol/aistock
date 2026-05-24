@@ -10,12 +10,15 @@ const REMOTE_BEARER_EXEMPT = ['/setup', '/api/setup', '/api/push/vapid-public-ke
 const BEARER_COOKIE = 'aistock_bearer';
 
 // Paths exempt from the username/password auth gate (login/register itself,
-// session-check, static assets, etc.).
+// session-check, static assets, etc.). A logged-out user MUST be able to hit
+// every entry here, otherwise the signup / login flow deadlocks.
 const AUTH_FREE_PATHS = new Set([
   '/login',
   '/register',
+  '/register/guest',
   '/api/auth/login',
   '/api/auth/register',
+  '/api/auth/register-guest',
   '/api/auth/me',
   '/api/auth/logout',
   '/setup',

@@ -9,16 +9,13 @@
  */
 export async function register(): Promise<void> {
   if (process.env.NEXT_RUNTIME !== 'nodejs') return;
-  // Self-heal schema on every cold start (prod + dev). Idempotent — re-runs
-  // the IF NOT EXISTS / DO blocks from migrate.ts so the platform doesn't
-  // 500 when deployed against a database that hasn't had `db:migrate` run.
-  try {
-    const { ensureSchema } = await import('./lib/db/ensure-schema');
-    await ensureSchema();
-  } catch (err) {
-    console.error('[ensureSchema] failed at boot:', err);
-    // Routes also call ensureSchema() lazily, so don't crash the server here.
-  }
+  // NOTE on schema self-heal: we deliberately do NOT call ensureSchema() here.
+  // instrumentation.ts is bundled separately and statically importing the DB
+  // client pulls `postgres`'s native `net`/`tls` requires into a webpack
+  // bundle that can't resolve them. Every API route that touches the new
+  // columns calls ensureSchema() lazily on its first hit — so the first
+  // request after a cold start does the bumps before any query runs. That
+  // gives us the same self-healing without the bundle hazard.
   if (process.env.NODE_ENV !== 'production') return;
   try {
     const mod = await import(/* webpackIgnore: true */ './lib/scheduler/index.js');
