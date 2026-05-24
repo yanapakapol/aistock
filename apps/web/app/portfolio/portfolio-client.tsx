@@ -65,17 +65,35 @@ export function PortfolioClient() {
     setListErr(null);
     try {
       const r = await fetch('/api/portfolio');
+      // The portfolio API now requires auth (per-user scoped post multi-tenant
+      // refactor). If the session expired or the user was deleted (e.g. a
+      // guest TTL elapsed mid-session), wipe any cached watchlist — it
+      // belongs to the now-defunct session and would otherwise leak across
+      // logins on the same browser — and bounce to /login.
+      if (r.status === 401) {
+        try {
+          sessionStorage.removeItem('aistock:cache:/api/portfolio');
+        } catch {
+          /* ignore */
+        }
+        window.location.href = '/login?next=/portfolio';
+        return;
+      }
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       const j = (await r.json()) as { stocks: Stock[] };
-      setStocks(j.stocks ?? []);
+      const fresh = j.stocks ?? [];
+      setStocks(fresh);
       try {
-        sessionStorage.setItem('aistock:cache:/api/portfolio', JSON.stringify({ ts: Date.now(), v: j }));
+        sessionStorage.setItem(
+          'aistock:cache:/api/portfolio',
+          JSON.stringify({ ts: Date.now(), v: { stocks: fresh } }),
+        );
       } catch {
         /* ignore */
       }
       setSelectedId((prev) => {
-        if (prev && j.stocks.some((s) => s.id === prev)) return prev;
-        return j.stocks[0]?.id ?? null;
+        if (prev && fresh.some((s) => s.id === prev)) return prev;
+        return fresh[0]?.id ?? null;
       });
     } catch (e) {
       setListErr(e instanceof Error ? e.message : 'Failed to load');
@@ -129,6 +147,26 @@ export function PortfolioClient() {
     setPriceErr(null);
     try {
       const res = await fetch(url);
+      if (res.status === 401) {
+        // Session vanished mid-page — bounce to /login. Same rationale as in
+        // loadStocks above.
+        window.location.href = '/login?next=/portfolio';
+        return;
+      }
+      // 404 here means "this stockId no longer belongs to you" — usually a
+      // stale sessionStorage cache from a previous user on the same browser.
+      // Surface a friendlier message and drop the cache so the next load
+      // reflects reality.
+      if (res.status === 404) {
+        try {
+          sessionStorage.removeItem(cacheKey);
+        } catch {
+          /* ignore */
+        }
+        setPrices([]);
+        setPriceErr('Stock not found in your portfolio');
+        return;
+      }
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const j = (await res.json()) as { rows: PriceRow[] };
       setPrices(j.rows ?? []);

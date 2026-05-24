@@ -59,13 +59,42 @@ export function InlineModelPicker({
   useEffect(() => {
     let cancelled = false;
     async function pickDefault() {
-      // 1. localStorage wins.
+      // 1. localStorage wins — but only if the modelId actually belongs to the
+      //    provider. Stale combos like {provider:'mistral', modelId:'claude-…'}
+      //    can leak in across default-provider changes; render the saved value
+      //    immediately for snappy paint, then validate in the background and
+      //    correct (and rewrite localStorage) if it's bogus.
       try {
         const raw = localStorage.getItem(LS_KEY(tab));
         if (raw) {
           const saved = JSON.parse(raw) as Selection;
           if (saved?.provider && saved.modelId && !cancelled) {
             setSel(saved);
+            // Fire-and-forget validation. Don't block render.
+            void fetch(`/api/models?provider=${saved.provider}`)
+              .then((r) => r.json())
+              .then((j: { models?: ModelInfo[] }) => {
+                if (cancelled) return;
+                const list = j.models ?? [];
+                setModels((prev) => ({ ...prev, [saved.provider]: list }));
+                const known = new Set(list.map((m) => m.id));
+                if (list.length && !known.has(saved.modelId)) {
+                  const replacement =
+                    list[0]?.id ?? DEFAULT_MODEL_FOR[saved.provider];
+                  const corrected: Selection = {
+                    provider: saved.provider,
+                    modelId: replacement,
+                  };
+                  setSel(corrected);
+                  try {
+                    localStorage.setItem(LS_KEY(tab), JSON.stringify(corrected));
+                  } catch {
+                    /* quota */
+                  }
+                  onChange?.(corrected);
+                }
+              })
+              .catch(() => undefined);
             return;
           }
         }
@@ -142,6 +171,16 @@ export function InlineModelPicker({
       // Provisionally update state with empty model.
       setSel({ provider: patch.provider, modelId: '' });
       return;
+    }
+    // Validate modelId-only changes against the provider's known model list
+    // when it's already been lazy-loaded. Prevents the parent (or a stale
+    // event) from saving a model that doesn't belong to the current provider.
+    if (patch.modelId && !patch.provider) {
+      const known = models[sel.provider];
+      if (known && known.length && !known.some((m) => m.id === patch.modelId)) {
+        // Refuse silently.
+        return;
+      }
     }
     setSel(next);
     try {

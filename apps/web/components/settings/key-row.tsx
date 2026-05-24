@@ -14,6 +14,14 @@ interface Props {
    *  LLM-row callers unchanged. */
   kind?: 'llm' | 'news';
   saved: boolean;
+  /** True when this key belongs to the admin and the current viewer is a guest
+   *  inheriting it. Renders an "inherited" pill next to the status text. */
+  inherited?: boolean;
+  /** When true (guest sessions), the row renders in read-only mode: input is
+   *  disabled, action buttons are hidden, and a tooltip explains why. */
+  readOnly?: boolean;
+  /** Tooltip shown on the disabled input when `readOnly` is true. */
+  readOnlyTooltip?: string;
   onChanged: () => void;
 }
 
@@ -23,7 +31,16 @@ type Status =
   | { kind: 'ok'; msg: string }
   | { kind: 'err'; msg: string };
 
-export function KeyRow({ provider, label, kind = 'llm', saved, onChanged }: Props) {
+export function KeyRow({
+  provider,
+  label,
+  kind = 'llm',
+  saved,
+  inherited = false,
+  readOnly = false,
+  readOnlyTooltip,
+  onChanged,
+}: Props) {
   const [value, setValue] = useState('');
   const [status, setStatus] = useState<Status>({ kind: 'idle' });
 
@@ -75,29 +92,63 @@ export function KeyRow({ provider, label, kind = 'llm', saved, onChanged }: Prop
     <div className="grid grid-cols-[160px_1fr_auto] items-center gap-3 border-b border-border py-3">
       <div className="text-sm">
         <div className="font-medium">{label}</div>
-        <div className={saved ? 'text-xs text-green-500' : 'text-xs text-muted-foreground'}>
-          {saved ? 'Key saved' : 'No key'}
+        <div className="flex items-center gap-1.5">
+          <span className={saved ? 'text-xs text-green-500' : 'text-xs text-muted-foreground'}>
+            {saved ? 'Key saved' : 'No key'}
+          </span>
+          {inherited ? (
+            <span
+              className="rounded-sm border border-border bg-muted px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-muted-foreground"
+              title="Inherited from the admin's vault"
+            >
+              inherited
+            </span>
+          ) : null}
         </div>
       </div>
       <Input
         type="password"
         autoComplete="off"
-        placeholder={saved ? 'Enter to replace' : kind === 'news' ? 'paste key' : 'sk-...'}
+        placeholder={
+          readOnly
+            ? 'Read-only'
+            : saved
+              ? 'Enter to replace'
+              : kind === 'news'
+                ? 'paste key'
+                : 'sk-...'
+        }
         value={value}
         onChange={(e) => setValue(e.target.value)}
+        disabled={readOnly}
+        title={readOnly ? readOnlyTooltip : undefined}
       />
       <div className="flex items-center gap-2">
-        <Button variant="outline" size="sm" onClick={probe} disabled={!value || status.kind === 'busy'}>
-          Test
-        </Button>
-        <Button size="sm" onClick={save} disabled={!value || status.kind === 'busy'}>
-          Save
-        </Button>
-        {saved ? (
-          <Button variant="destructive" size="sm" onClick={remove} disabled={status.kind === 'busy'}>
-            Remove
-          </Button>
-        ) : null}
+        {readOnly ? null : (
+          <>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={probe}
+              disabled={!value || status.kind === 'busy'}
+            >
+              Test
+            </Button>
+            <Button size="sm" onClick={save} disabled={!value || status.kind === 'busy'}>
+              Save
+            </Button>
+            {saved ? (
+              <Button
+                variant="destructive"
+                size="sm"
+                onClick={remove}
+                disabled={status.kind === 'busy'}
+              >
+                Remove
+              </Button>
+            ) : null}
+          </>
+        )}
       </div>
       {status.kind !== 'idle' ? (
         <div

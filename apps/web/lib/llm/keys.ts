@@ -4,6 +4,7 @@ import { db } from '@/lib/db/client';
 import { apiKeys } from '@/lib/db/schema';
 import { encryptSecret, decryptSecret, type EncryptedRecord } from '@/lib/crypto/envelope';
 import { getCurrentUser } from '@/lib/auth/session';
+import { getAdminUserId } from '@/lib/auth/effective-user';
 import type { Provider } from './providers';
 
 // Map provider → env-var name. Admin users fall back to these when no vault
@@ -66,6 +67,47 @@ export async function loadApiKey(provider: Provider): Promise<string | null> {
     await db.update(apiKeys).set({ lastUsedAt: new Date() }).where(eq(apiKeys.id, row.id));
     return decryptSecret({ record: rec, provider });
   }
+  // Guest fallback: guests share the admin's quota & capabilities per the
+  // product spec, so when they have no row of their own we transparently
+  // resolve the admin's row and decrypt it server-side. The plaintext is
+  // used internally (e.g. as the bearer for the LLM call) and never leaks
+  // back to the client — /api/keys GET returns existence-only.
+  if (u?.role === 'guest') {
+    const adminId = await getAdminUserId();
+    if (adminId != null && adminId !== userId) {
+      const adminRow = (
+        await db
+          .select()
+          .from(apiKeys)
+          .where(and(eq(apiKeys.userId, adminId), eq(apiKeys.provider, provider)))
+          .limit(1)
+      )[0];
+      if (adminRow) {
+        const rec: EncryptedRecord = {
+          ciphertext: adminRow.ciphertext as Buffer,
+          nonce: adminRow.nonce as Buffer,
+          tag: adminRow.tag as Buffer,
+          wrappedDek: adminRow.wrappedDek as Buffer,
+          dekNonce: adminRow.dekNonce as Buffer,
+          dekTag: adminRow.dekTag as Buffer,
+          kid: adminRow.kid,
+        };
+        // Touch lastUsedAt on the admin row so usage analytics still reflect
+        // the inherited key being exercised.
+        await db
+          .update(apiKeys)
+          .set({ lastUsedAt: new Date() })
+          .where(eq(apiKeys.id, adminRow.id));
+        const plaintext = await decryptSecret({ record: rec, provider });
+        if (plaintext) return plaintext;
+      }
+      // No admin row in DB? Fall through to env-var backstop below so a
+      // freshly-bootstrapped guest still works while the admin has only
+      // host env keys configured.
+      const env = process.env[ADMIN_ENV[provider]];
+      if (env && env.length > 0) return env;
+    }
+  }
   // Admin fallback: use the host's own env-var keys so the admin can run
   // the platform without re-typing keys, while non-admins must bring their
   // own (they can't drain admin's quota).
@@ -96,5 +138,27 @@ export async function listSavedProviders(): Promise<
     })
     .from(apiKeys)
     .where(userId == null ? isNull(apiKeys.userId) : eq(apiKeys.userId, userId));
+  return rows as Array<{ provider: Provider; createdAt: Date; lastUsedAt: Date | null }>;
+}
+
+/**
+ * Same shape as `listSavedProviders` but returns only the admin's rows.
+ * Used by /api/keys GET to expose "inherited" providers to a guest caller
+ * (existence-only — no plaintext, no ciphertext). Returns [] if there is no
+ * admin row, the caller chose to skip the lookup, or the DB query fails.
+ */
+export async function listAdminSavedProviders(): Promise<
+  Array<{ provider: Provider; createdAt: Date; lastUsedAt: Date | null }>
+> {
+  const adminId = await getAdminUserId();
+  if (adminId == null) return [];
+  const rows = await db
+    .select({
+      provider: apiKeys.provider,
+      createdAt: apiKeys.createdAt,
+      lastUsedAt: apiKeys.lastUsedAt,
+    })
+    .from(apiKeys)
+    .where(eq(apiKeys.userId, adminId));
   return rows as Array<{ provider: Provider; createdAt: Date; lastUsedAt: Date | null }>;
 }

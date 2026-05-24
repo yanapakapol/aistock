@@ -2,6 +2,7 @@ import { NextResponse, type NextRequest } from 'next/server';
 import { z } from 'zod';
 import { PROVIDERS, type Provider } from '@/lib/llm/providers';
 import { NEWS_PROVIDERS, type NewsProvider } from '@/lib/news/providers';
+import { getCurrentUser } from '@/lib/auth/session';
 
 export const runtime = 'nodejs';
 
@@ -20,6 +21,13 @@ const NEWS_SET = new Set<string>(NEWS_PROVIDERS);
 export async function POST(req: NextRequest) {
   if (req.headers.get('sec-fetch-site') && req.headers.get('sec-fetch-site') !== 'same-origin') {
     return NextResponse.json({ error: 'cross-origin denied' }, { status: 403 });
+  }
+  // Guests inherit the admin's keys and never paste their own — block any
+  // probe attempt so guest sessions can't smuggle a key out via the upstream
+  // probe endpoints. UI hides the Test button; this is defense in depth.
+  const u = await getCurrentUser().catch(() => null);
+  if (u?.role === 'guest') {
+    return NextResponse.json({ error: 'guests cannot modify keys' }, { status: 403 });
   }
   const parsed = Body.safeParse(await req.json().catch(() => null));
   if (!parsed.success) return NextResponse.json({ error: 'bad request' }, { status: 400 });

@@ -538,6 +538,10 @@ export async function POST(req: NextRequest) {
   ];
 
   // Discover every provider with a saved key (so we can auto-fill the chain).
+  // `loadApiKey` resolves the effective user internally via `getCurrentUser()`
+  // and, for role='guest', transparently falls back to the admin's encrypted
+  // row — so guest sessions can chat using inherited keys without us threading
+  // anything explicit through this route.
   const providersWithKeys: Provider[] = [];
   for (const p of PROVIDERS) {
     const k = await loadApiKey(p);
