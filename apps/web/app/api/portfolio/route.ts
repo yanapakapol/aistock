@@ -7,6 +7,10 @@ import { getDefaultPortfolioId, listStocks } from '@/lib/portfolio/queries';
 
 export const runtime = 'nodejs';
 
+const SWR_HEADERS = {
+  'Cache-Control': 'private, max-age=10, stale-while-revalidate=300',
+};
+
 const AddBody = z.object({
   symbol: z.string().min(1).max(32),
   exchange: z.string().min(1).max(16),
