@@ -43,10 +43,17 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     isAdmin: boolean;
     role?: 'admin' | 'user' | 'guest';
   } | null>(null);
+  // Tri-state for /api/auth/me: 'pending' (unknown — still in flight),
+  // 'loaded' (response arrived, `me` is either user-object or null). Lets us
+  // distinguish "loading, don't render yet" from "definitely logged out" so
+  // we can show optimistic placeholders without flashing wrong content.
+  const [meStatus, setMeStatus] = useState<'pending' | 'loaded'>('pending');
   // Fire ONCE on mount — not on every pathname change. The response carries
   // Cache-Control: private, max-age=300, so logout/login changes are picked up
   // within 5 min anyway (and logout/login itself hard-navigates). Cuts one DB
-  // call per client-side navigation.
+  // call per client-side navigation. Critically: render is NOT blocked on this
+  // promise; the main nav paints synchronously with `me === null` and updates
+  // in place once the response lands. Only admin-only items wait for confirm.
   useEffect(() => {
     fetch('/api/auth/me')
       .then((r) => r.json())
@@ -55,7 +62,8 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           user?: { username: string; isAdmin: boolean; role?: 'admin' | 'user' | 'guest' } | null;
         }) => setMe(j.user ?? null),
       )
-      .catch(() => undefined);
+      .catch(() => undefined)
+      .finally(() => setMeStatus('loaded'));
   }, []);
   async function logout() {
     await fetch('/api/auth/logout', { method: 'POST', headers: { 'content-type': 'application/json' } });
@@ -171,6 +179,20 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                 Hidden for admins and unlimited users by the component itself. */}
             <div className="px-2">
               <CapRequestButton />
+            </div>
+          </div>
+        ) : meStatus === 'pending' ? (
+          // Skeleton: reserve the footer's vertical space while /api/auth/me
+          // is in flight so the nav layout doesn't shift when the user chip
+          // appears. Pulsing bars hint that something is loading without
+          // blocking the rest of the shell from painting.
+          <div className="mt-auto border-t border-border pt-3" aria-hidden="true">
+            <div className="flex items-center justify-between px-2">
+              <div className="space-y-1.5">
+                <div className="h-2.5 w-20 animate-pulse rounded bg-muted" />
+                <div className="h-2 w-28 animate-pulse rounded bg-muted/60" />
+              </div>
+              <div className="h-5 w-5 animate-pulse rounded bg-muted" />
             </div>
           </div>
         ) : null}

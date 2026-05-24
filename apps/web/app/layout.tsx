@@ -27,6 +27,19 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
       className="dark"
       suppressHydrationWarning
     >
+      <head>
+        {/* Pre-open TCP+TLS sockets to every host the page might hit during a
+            chat turn. Saves ~100-300ms of DNS+TLS handshake cost on the first
+            request to each provider — meaningful on mobile / cold serverless
+            invocations. dns-prefetch is the cheaper sibling for hosts we may
+            not actually call this session. */}
+        <link rel="preconnect" href="https://api.mistral.ai" crossOrigin="anonymous" />
+        <link rel="preconnect" href="https://api.openai.com" crossOrigin="anonymous" />
+        <link rel="preconnect" href="https://api.anthropic.com" crossOrigin="anonymous" />
+        <link rel="dns-prefetch" href="https://generativelanguage.googleapis.com" />
+        <link rel="dns-prefetch" href="https://api.deepseek.com" />
+        <link rel="dns-prefetch" href="https://api.moonshot.ai" />
+      </head>
       <body className="min-h-screen antialiased">
         <ThemeBootstrap />
         <LoadingBar />

@@ -88,6 +88,9 @@ export function MessageList({ messages, streaming }: Props) {
     endRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
   }
 
+  const last = messages[messages.length - 1];
+  const lastIsUser = last?.role === 'user';
+
   return (
     <div className="relative">
       <div className="mx-auto flex max-w-3xl flex-col gap-6 px-6 py-6">
@@ -95,7 +98,13 @@ export function MessageList({ messages, streaming }: Props) {
         {messages.map((m) => (
           <MessageBubble key={m.id} message={m} />
         ))}
-        {streaming ? <StreamingDot /> : null}
+        {/* Optimistic placeholder: while `streaming` is true and the latest
+            message in the list is the user's just-sent turn (no assistant turn
+            yet), render a visible "Sending…" bubble so the UI is never frozen
+            between Enter-press and first LLM byte. As soon as the assistant
+            message lands in `messages`, this disappears and the real bubble
+            takes over — keyed off `lastIsUser` so there's no flicker. */}
+        {streaming && lastIsUser ? <PendingAssistantBubble /> : null}
         <div ref={endRef} />
       </div>
       {!pinned && (streaming || messages.length > 0) ? (
@@ -129,12 +138,19 @@ function MessageBubble({ message }: { message: UIMessage }) {
         const toolName = p.toolName ?? p.type.replace(/^tool-/, '');
         const args = p.input ?? p.args;
         const result = p.output ?? p.result;
+        // AI SDK v6 reports per-part lifecycle via `state`:
+        //   'input-streaming' | 'input-available' | 'output-available' | 'output-error'
+        // Use it when present so we render the pending chip the moment the tool
+        // call is dispatched — even before any output bytes arrive. Fall back to
+        // result-presence for older shapes.
+        const running =
+          p.state != null ? p.state !== 'output-available' && p.state !== 'output-error' : result == null;
         chunks.push({
           kind: 'tool',
           toolName,
           toolArgs: args,
           toolResult: result,
-          running: result == null,
+          running,
         });
       }
     }
@@ -404,10 +420,25 @@ function MessageActions({ text }: { text: string }) {
   );
 }
 
-function StreamingDot() {
+/**
+ * Optimistic assistant bubble shown the instant the user submits, before the
+ * server's first byte arrives. Once a real assistant message lands in the
+ * `messages` array this is unmounted (see `lastIsUser` check above). Three
+ * staggered dots give the user immediate "yes, your input was received"
+ * feedback — much clearer than a single pulsing dot for tool-using models
+ * that can take 5–30s before emitting their first token.
+ */
+function PendingAssistantBubble() {
   return (
-    <div className="flex justify-start">
-      <div className="h-2 w-2 animate-pulse rounded-full bg-foreground/50" />
+    <div className="flex w-full justify-start" aria-live="polite">
+      <div className="flex items-center gap-2 rounded-lg border border-border bg-muted/15 px-3 py-2 text-xs text-muted-foreground">
+        <span className="flex items-center gap-1">
+          <span className="inline-block h-1.5 w-1.5 animate-bounce rounded-full bg-foreground/60 [animation-delay:-0.3s]" />
+          <span className="inline-block h-1.5 w-1.5 animate-bounce rounded-full bg-foreground/60 [animation-delay:-0.15s]" />
+          <span className="inline-block h-1.5 w-1.5 animate-bounce rounded-full bg-foreground/60" />
+        </span>
+        <span>Sending…</span>
+      </div>
     </div>
   );
 }

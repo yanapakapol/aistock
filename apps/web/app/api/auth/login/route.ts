@@ -6,7 +6,12 @@ import { users } from '@/lib/db/schema';
 import { verifyPassword } from '@/lib/auth/password';
 import { createSession } from '@/lib/auth/session';
 
-export const runtime = 'nodejs';
+// Edge runtime: every login starts a session — moving off Node cold-start
+// (~1-2s) onto Edge (~50-100ms) is a big perceived-latency win. Safe here
+// because: bcryptjs has a `"browser": { "crypto": false }` export map and
+// falls back to Web Crypto for random bytes; @neondatabase/serverless is
+// HTTP-based and edge-compatible; session.ts uses Web Crypto for HMAC.
+export const runtime = 'edge';
 
 const Body = z.object({
   username: z.string().min(1).max(64),

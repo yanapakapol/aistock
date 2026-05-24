@@ -29,10 +29,17 @@ export function Composer({
   function submit() {
     const text = value.trim();
     if (!text || isLoading) return;
+    // Clear the textarea synchronously BEFORE calling onSubmit so the input
+    // feels instant — even if the parent's onSubmit later updates state.
+    // (Parent's submitInput also calls setInput(''), but doing it here too
+    // makes the local DOM feel responsive within the same paint frame.)
+    onChange('');
     onSubmit(text);
   }
 
   function handleKeyDown(e: KeyboardEvent<HTMLTextAreaElement>) {
+    // Enter sends; Shift+Enter inserts a newline. IME composition (e.g. Thai,
+    // Japanese) takes priority — never submit mid-composition.
     if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
       e.preventDefault();
       submit();
@@ -64,7 +71,8 @@ export function Composer({
         />
         {isLoading && onStop ? (
           <Button type="button" size="sm" variant="outline" onClick={onStop}>
-            Stop
+            <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-foreground/70" />
+            <span className="ml-2">Stop</span>
           </Button>
         ) : (
           <Button type="submit" size="sm" disabled={inputDisabled || !value.trim()}>

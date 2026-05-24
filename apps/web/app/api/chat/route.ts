@@ -11,7 +11,7 @@ import { loadApiKey } from '@/lib/llm/keys';
 import { clientFor } from '@/lib/llm/clientFor';
 
 // Cross-team modules — interfaces only; concrete code lives in other agents' PRs.
-import { TOOLS } from '@/lib/mcp/tools';
+import { getToolsByNames, allToolNames } from '@/lib/mcp/tools/lazy';
 import { toAiSdkTool } from '@/lib/mcp/adapters/aiSdk';
 import { scrubSecrets, sanitizeError } from '@/lib/security/scrub';
 import { meter } from '@/lib/cost/meter';
@@ -73,6 +73,49 @@ const BodySchema = z.object({
    */
   fallbackModels: z.array(FallbackEntrySchema).optional(),
 });
+
+// ---------- System preamble fragments (module-scoped, parsed once) ----------
+
+// Research-tab workflow text. Long, so kept out of the request handler.
+// {DB_HINT} placeholder is substituted per-request based on the dbMode flag.
+const RESEARCH_EXTRA_TEMPLATE = `
+
+RESEARCH TAB WORKFLOW:
+  - {DB_HINT}
+  - upsert_event / upsert_future_event / upsert_business_context persist immediately to Postgres. You MUST actually call them — describing them is not enough. Every search_news article with a usable date must be persisted via upsert_event before you write prose.
+  - End every reply with a single marker line, no other text: "[[SAVED:E=4,F=1,C=1]]" (E=events, F=future_events, C=1 if business_context updated else 0). If nothing saved: "[[SAVED:E=0,F=0,C=0]]". The UI renders it as a badge.
+  - Mention the top-right "DB" panel for inspection.
+
+AUTO-SAVE ALGORITHM (every research turn, no permission needed):
+  1. PAST EVENT — upsert_event for any search_news article with non-null published_date that mentions the active stock. Fields: stock_id, event_date=published_date, title (<=120 chars), summary_md (2-4 sentences in your words), source_url, sentiment_label in {bull,bear,neutral}, sentiment_score in [-1,1].
+  2. FUTURE EVENT — upsert_future_event for any dated upcoming catalyst (earnings, FDA, trial, CMD, expiry, regulatory). Fields: expected_date, title, description_md, probability_positive + probability_negative in [0,1] summing <=1 (null if unknown), expected_impact_pct, source_urls.
+  3. BUSINESS CONTEXT — at end of session, call upsert_business_context once per section (summary | timeline | future_outlook) with merged patch_md (<1500 chars each).
+  4. event_date order: (a) explicit date in article body; (b) published_date; (c) today. Never invent dates or URLs — skip and report the gap instead.
+  5. DEDUPE — Research tab cannot call get_events; rely on consolidate_events at the end.
+  6. FINAL STEP — call consolidate_events({stock_id, dry_run:false}) ONCE after upserts; include returned deleted count in the [[SAVED:...]] marker.`;
+
+const RESEARCH_DB_HINT_ON =
+  'DB MODE ON: you may call get_events, get_business_context, get_future_events, get_prices to consult existing rows and avoid duplicates.';
+const RESEARCH_DB_HINT_OFF =
+  'DB MODE OFF: DB read tools are not available. Use search_news + reasoning, then write findings via upsert tools.';
+
+const ANALYSIS_EXTRA = `
+
+ANALYSIS TAB WORKFLOW (in order):
+  1. Read DB first: get_business_context, get_events (limit 20), get_future_events, get_prices (last 90d).
+  2. Identify gaps; only then call search_news to fill them.
+  3. Cite DB events inline as [event #ID]; cite news as [source: hostname]. Include full URLs in a final "Citations" section as markdown links ("- [event #N — title](url)" or "- [news: hostname](url)"). If none: "Citations: (none)".`;
+
+const SYSTEM_PREAMBLE_BASE =
+  `You are a stock-research assistant inside the aistock platform. ` +
+  `If you need the current date, call get_current_datetime — never guess. ` +
+  `You have MCP tools for DB reads/writes and news search. ` +
+  `Rules: (1) Never fabricate news/events/prices — only report what tools return. ` +
+  `(2) If a tool returns "NEWS SEARCH UNAVAILABLE" or "no_keys_configured", relay verbatim and stop. ` +
+  `(3) Cite event IDs and source URLs when summarizing events. ` +
+  `(4) Be concise; no ornamental separators (---, ***, ===). If you announce a tool call, execute it the same turn. ` +
+  `(5) Tabular data: GFM pipe tables. Charts: fenced \`chart\` block with JSON {type:'line'|'bar', title?, xLabel?, yLabel?, data:[{x,y}]}. ` +
+  `Example upsert_event input: {"stock_id":123,"event_date":"2025-03-14","title":"Q1 beat","summary_md":"...","source_url":"https://...","sentiment_label":"bull","sentiment_score":0.6}`;
 
 // ---------- Fallback policy ----------
 
@@ -381,10 +424,9 @@ export async function POST(req: NextRequest) {
     'consolidate_events',
     'get_current_datetime',
   ]);
-  const toolsList =
-    tab === 'research' && !dbMode
-      ? TOOLS.filter((t) => RESEARCH_TOOL_ALLOW.has(t.name))
-      : TOOLS;
+  const allowedNames =
+    tab === 'research' && !dbMode ? Array.from(RESEARCH_TOOL_ALLOW) : allToolNames();
+  const toolsList = await getToolsByNames(allowedNames);
   // Pass the authenticated user's id into every tool's ctx. Stock-scoped
   // tools use this to refuse access to data outside the caller's portfolio.
   const tools = Object.fromEntries(
@@ -398,65 +440,21 @@ export async function POST(req: NextRequest) {
   const stockCtx = await stockCtxP;
   const researchExtra =
     tab === 'research'
-      ? [
-          '',
-          '',
-          'RESEARCH TAB WORKFLOW:',
-          dbMode
-            ? '  • DB MODE ON: you may also call get_events, get_business_context, get_future_events, get_prices, etc. to consult existing DB rows before writing new ones (use it to avoid duplicating known events).'
-            : '  • DB MODE OFF: you CANNOT read from the database (get_events, get_business_context, get_prices etc. are deliberately not in your toolset). Do everything via search_news + your own reasoning, then WRITE the findings.',
-          '  • Whenever you call upsert_event, upsert_future_event, or upsert_business_context the row is persisted to Postgres immediately.',
-          '  • CRITICAL: you MUST actually CALL the upsert tools (not just describe them). Every article search_news returns with a usable date MUST be persisted via upsert_event before you write any prose. Failure to call the tool when warranted is a violation of these instructions.',
-          '  • At the END of every assistant response, append a SINGLE TINY marker on its own line, no other text: "[[SAVED:E=4,F=1,C=1]]" where E=events upserted, F=future_events upserted, C=1 if business_context was updated else 0. If nothing was saved, write "[[SAVED:E=0,F=0,C=0]]". The UI converts this marker into a small green badge — do not write a full sentence.',
-          '  • Tell the user they can open the DB panel (top-right "DB" button) to inspect every stored row.',
-          '',
-          'AUTO-SAVE ALGORITHM (apply on every research turn, do not ask permission):',
-          '  1. PAST EVENT — call upsert_event whenever search_news returns an article that BOTH (a) has a non-null published_date AND (b) materially relates to the active stock (mentions ticker/company in title or content). Required fields: stock_id, event_date=published_date, title=article title (≤120 chars), summary_md=2-4 sentence excerpt rewritten in your own words, source_url=URL, sentiment_label∈{bull,bear,neutral}, sentiment_score∈[-1,1] (your judgement).',
-          '  2. FUTURE EVENT — call upsert_future_event whenever an article or your prior context implies a dated upcoming catalyst (earnings, FDA decision, trial readout, capital markets day, expiration, election, regulatory deadline). Required: expected_date (best-guess ISO date or month), title, description_md, probability_positive and probability_negative as decimals in [0,1] summing to ≤1 (assign your best estimate; if unknown leave both null), expected_impact_pct (best-guess price impact in pct), source_urls.',
-          '  3. BUSINESS CONTEXT — at the END of every research session, before the footer, call upsert_business_context once per section (summary | timeline | future_outlook) with a merged patch_md that integrates findings from THIS session with whatever the tool already has. Keep each section under 1500 chars.',
-          '  4. NEVER fabricate a date or URL. If a relevant article lacks a date, SKIP the upsert and report the gap in your reply.',
-          '  5. DEDUPE — before upserting, call get_events with the same date window; if a row with matching title already exists, skip rather than insert a duplicate. (Research tab cannot call get_events; rely on consolidate_events at the end instead.)',
-          '  6. DATE FALLBACK — when upserting an event, choose event_date in this strict order:',
-          '       (a) explicit event date from the article body if stated;',
-          '       (b) else the source article\'s published_date;',
-          '       (c) else today\'s date (the date the search was performed). NEVER invent a fake earlier date.',
-          '  7. CONSOLIDATE — AT THE VERY END of every research turn (after all upserts), call consolidate_events({stock_id, dry_run:false}) ONCE. It groups near-duplicate titles, keeps the row with the newest event_date and the longest insightful summary, and deletes the rest. Then include the returned `deleted` count in the [[SAVED:…]] footer marker.',
-        ].join('\n')
+      ? RESEARCH_EXTRA_TEMPLATE.replace(
+          '{DB_HINT}',
+          dbMode ? RESEARCH_DB_HINT_ON : RESEARCH_DB_HINT_OFF,
+        )
       : '';
-  const analysisExtra =
-    tab === 'analysis'
-      ? [
-          '',
-          '',
-          'ANALYSIS TAB WORKFLOW (mandatory order, do not skip):',
-          '  Step 1 — Read what we already know from Postgres FIRST: call get_business_context, get_events (limit 20), get_future_events, and get_prices (last 90 days) for the active stock.',
-          '  Step 2 — Identify gaps. Only THEN call search_news to fill gaps; do not search news without first checking the DB.',
-          '  Step 3 — When you cite a DB event, write [event #ID] inline; when you cite a news article, write [source: hostname]. Always include the full URL in the citations list.',
-          '  Step 4 — End every answer with a "Citations" section listing every event_id and source URL you used, as clickable markdown links: "- [event #N — title](source_url)" or "- [news: hostname](url)". If you cited nothing, write "Citations: (none)".',
-        ].join('\n')
-      : '';
+  const analysisExtra = tab === 'analysis' ? ANALYSIS_EXTRA : '';
   const budgetBrief =
-    `BUDGET (this turn ONLY — resets every new user message; tool calls from earlier turns in the conversation DO NOT count against this budget): ` +
-    `tool calls = ${effectiveIter} this turn (one search_news = 1 call; one upsert_event = 1 call), ` +
-    `USD cap = $${effectiveUsd.toFixed(2)} this turn. ` +
-    `If you see tool-call results in earlier assistant messages, those are HISTORY and free. Your budget here is for NEW tool calls you make in THIS turn. ` +
-    `Plan accordingly BEFORE you start: small budget (≤3) → ONE focused search, save 1-2 best events, write a brief answer. ` +
-    `Large budget (≥12) → multiple searches across drivers, save many events, write a thorough answer. ` +
-    `ABSOLUTE RULE — your VERY LAST step in this turn MUST be a plain text response (no tool call). Never end on a tool call. Reserve at least 2 steps purely for synthesizing the answer. If you would otherwise hit the cap, STOP calling tools at iteration ${Math.max(1, effectiveIter - 1)} and write the answer with what you have. Empty responses are forbidden.`;
+    `BUDGET (this turn only, resets each user message; earlier-turn tool calls don't count): ` +
+    `${effectiveIter} tool calls, $${effectiveUsd.toFixed(2)} cap. ` +
+    `LAST step must be plain text — never end on a tool call. Stop calling tools by iteration ${Math.max(1, effectiveIter - 1)} and write the answer with what you have.`;
 
   const systemPreamble =
-    `You are a stock-research assistant inside the aistock platform. ` +
+    SYSTEM_PREAMBLE_BASE +
+    ' ' +
     budgetBrief +
-    ` ` +
-    `If you need the current date for any reason (validating "recent", computing "last 6 months", checking if an article is in the future), CALL the get_current_datetime tool — never guess from your training data. The real wall-clock date may be later than what you remember. ` +
-    `You have MCP tools for DB reads/writes and news search. ` +
-    `Rules: (1) NEVER fabricate, simulate, or hypothesise news/events/prices — only report what tools return. ` +
-    `(2) If a tool returns "NEWS SEARCH UNAVAILABLE" or any "no_keys_configured" hint, tell the user verbatim and stop. ` +
-    `(3) Always cite event IDs and source URLs when summarizing events. ` +
-    `(4) Be concise; avoid ornamental separators (---, ***, ===). Never write "I will now…" or "Proceeding with…" then stop — if you announce a tool call you MUST execute it in the same turn. ` +
-    `(5) For tabular data use GFM pipe tables (| col | col |\\n|---|---|\\n| a | b |). ` +
-    `For time-series or comparison plots, emit a fenced block tagged \`chart\` with JSON ` +
-    `{type:'line'|'bar', title?, xLabel?, yLabel?, data:[{x,y}]} — the UI renders it as SVG.` +
     (stockCtx ? `\n\n${stockCtx}` : '') +
     analysisExtra +
     researchExtra;

@@ -4,15 +4,11 @@ import { db } from '@/lib/db/client';
 import { users } from '@/lib/db/schema';
 import { sql } from 'drizzle-orm';
 
-// TODO(edge): this route is a hot path on every page mount (AppShell). It
-// would be MUCH faster on Vercel's Edge runtime (no Node cold start, ~10ms
-// instead of 100-300ms). BLOCKED today because:
-//   1. `getCurrentUser()` calls `postgres` via Drizzle (Node-only TCP driver).
-//   2. The `totalUsers` count also hits Postgres.
-// To migrate: switch to `@neondatabase/serverless` (Neon's HTTP driver, edge-
-// compatible) and verify SESSION_SECRET reads work via `process.env` on edge.
-// Until then, keep runtime = 'nodejs'.
-export const runtime = 'nodejs';
+// Hot path: every page mount fires this from AppShell. Running on Edge
+// (Web Crypto for session HMAC + @neondatabase/serverless HTTP driver for
+// the legacy-cookie DB fallback + the totalUsers count) drops cold-start
+// from ~1-2s to ~50-100ms.
+export const runtime = 'edge';
 
 export async function GET() {
   // Run user lookup and total-users count in parallel — they are independent.
