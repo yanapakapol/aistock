@@ -73,7 +73,10 @@ function isBudgetExceeded(err: unknown): boolean {
 async function resolveProvider(modelId: string): Promise<Provider | null> {
   // 1) Static registry — dynamic import so we don't pin pricing into the bundle
   //    if/when this is split out.
-  const mod = (await import('../llm/models.json', { with: { type: 'json' } })) as unknown as {
+  // NOTE: do NOT use `{ with: { type: 'json' } }` — Vercel's bundler
+  // silently drops the route bundle when that ES2025 attribute is present.
+  // Plain dynamic import works everywhere.
+  const mod = (await import('../llm/models.json')) as unknown as {
     default: Record<string, { models: Array<{ id: string }> }>;
   };
   const registry = mod.default;

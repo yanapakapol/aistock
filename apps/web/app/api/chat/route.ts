@@ -266,8 +266,13 @@ export async function POST(req: NextRequest) {
   const sessionUserP = getCurrentUser();
   // models.json is needed later when building the fallback chain; importing
   // it now overlaps the dynamic-import cost with the network/DB I/O above.
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const registryP = import('@/lib/llm/models.json', { with: { type: 'json' } }) as unknown as Promise<{
+  //
+  // NOTE: We previously used `import(..., { with: { type: 'json' } })` (the
+  // ES2025 import-attributes syntax). Vercel's bundler silently failed to
+  // compile this route when that syntax was present — old function bundle
+  // kept serving while 5 commits in a row "succeeded" with zero diagnostic.
+  // Plain dynamic import works on every Node version we support.
+  const registryP = import('@/lib/llm/models.json') as unknown as Promise<{
     default: Record<string, { models?: Array<{ id: string }> }>;
   }>;
 
