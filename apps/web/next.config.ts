@@ -1,14 +1,22 @@
 import type { NextConfig } from 'next';
 
 const isDev = process.env.NODE_ENV !== 'production';
+// Vercel preview deployments inject vercel.live's feedback widget script.
+// On prod / self-host this is a no-op (Vercel doesn't add it). We allow it
+// only on Vercel deploys so the CSP error in the console goes away.
+const onVercel = !!process.env.VERCEL;
+const vercelScript = onVercel ? ' https://vercel.live' : '';
+const vercelConnect = onVercel ? ' https://vercel.live wss://ws-us3.pusher.com' : '';
+const vercelFrame = onVercel ? ' https://vercel.live' : '';
 
 const csp = [
   "default-src 'self'",
-  `script-src 'self' 'unsafe-inline'${isDev ? " 'unsafe-eval'" : ''}`,
+  `script-src 'self' 'unsafe-inline'${isDev ? " 'unsafe-eval'" : ''}${vercelScript}`,
   "style-src 'self' 'unsafe-inline'",
-  "img-src 'self' data: https:",
+  `img-src 'self' data: https:`,
   "font-src 'self' data:",
-  "connect-src 'self'",
+  `connect-src 'self'${vercelConnect}`,
+  `frame-src 'self'${vercelFrame}`,
   "frame-ancestors 'none'",
 ].join('; ');
 
