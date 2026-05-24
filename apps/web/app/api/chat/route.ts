@@ -18,7 +18,8 @@ import { meter } from '@/lib/cost/meter';
 import { addSpend, checkBudgetOrThrow } from '@/lib/cost/ledger';
 
 export const runtime = 'nodejs';
-// Long-running streams shouldn't be capped by default vercel limits.
+// Long-running streams. Vercel Hobby caps at 60s, Pro at 300s. Netlify free
+// caps at 10s, Pro at 26s — Netlify free WILL kill Deep Research mid-stream.
 export const maxDuration = 300;
 
 // ---------- Request schema ----------

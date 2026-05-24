@@ -201,7 +201,7 @@ export function ResearchClient({ stock }: { stock: StockLite | null }) {
     [],
   );
 
-  const { messages, sendMessage, status, setMessages, stop } = useChat({ transport });
+  const { messages, sendMessage, status, setMessages, stop, error } = useChat({ transport });
 
   // History load via ?loadChat=<id> URL param (most reliable restore path).
   usePendingChatLoad({
@@ -412,6 +412,11 @@ export function ResearchClient({ stock }: { stock: StockLite | null }) {
         )}
       </div>
 
+      {error ? (
+        <div className="border-t border-red-500/40 bg-red-500/5 px-4 py-2 text-xs text-red-400">
+          chat error: {error.message ?? String(error)}
+        </div>
+      ) : null}
       <Composer
         value={input}
         onChange={setInput}
