@@ -67,5 +67,11 @@ export async function GET(
     volume: typeof r.volume === 'bigint' ? r.volume.toString() : r.volume,
   }));
 
-  return NextResponse.json({ stockId, from, to, prices: serialized });
+  return NextResponse.json(
+    { stockId, from, to, rows: serialized, prices: serialized },
+    {
+      // Daily prices barely change intraday; cache aggressively in the browser.
+      headers: { 'Cache-Control': 'private, max-age=900, stale-while-revalidate=86400' },
+    },
+  );
 }

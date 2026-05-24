@@ -8,7 +8,9 @@ import { getDefaultPortfolioId, listStocks } from '@/lib/portfolio/queries';
 export const runtime = 'nodejs';
 
 const SWR_HEADERS = {
-  'Cache-Control': 'private, max-age=10, stale-while-revalidate=300',
+  // Cache portfolio listing for 5 min, allow up to 1 h stale while we revalidate.
+  // Watchlist barely changes mid-session.
+  'Cache-Control': 'private, max-age=300, stale-while-revalidate=3600',
 };
 
 const AddBody = z.object({

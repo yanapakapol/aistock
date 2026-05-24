@@ -19,7 +19,7 @@ export async function GET(req: NextRequest) {
     { provider: provider.data, models },
     {
       headers: {
-        'Cache-Control': 'private, max-age=300, stale-while-revalidate=86400',
+        'Cache-Control': 'private, max-age=3600, stale-while-revalidate=86400',
       },
     },
   );

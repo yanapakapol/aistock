@@ -3,6 +3,7 @@ import './globals.css';
 import { AppShell } from '@/components/app-shell';
 import { RegisterSw } from '@/components/pwa/register-sw';
 import { ThemeBootstrap } from '@/components/theme-toggle';
+import { LoadingBar } from '@/components/loading-bar';
 
 export const metadata: Metadata = {
   title: 'aistock',
@@ -28,6 +29,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
     >
       <body className="min-h-screen antialiased">
         <ThemeBootstrap />
+        <LoadingBar />
         <AppShell>{children}</AppShell>
         <RegisterSw />
       </body>

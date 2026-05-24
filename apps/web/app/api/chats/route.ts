@@ -45,7 +45,10 @@ export async function GET(req: NextRequest) {
     .orderBy(desc(chats.createdAt))
     .limit(100);
 
-  return NextResponse.json({ chats: rows });
+  return NextResponse.json(
+    { chats: rows },
+    { headers: { 'Cache-Control': 'private, max-age=60, stale-while-revalidate=600' } },
+  );
 }
 
 const DeleteBody = z.object({ ids: z.array(z.number().int().positive()).min(1) });

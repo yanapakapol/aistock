@@ -13,7 +13,14 @@ export async function GET() {
   const [{ count }] = (await db.execute(
     sql`select count(*)::int as count from users`,
   ).catch(() => [{ count: 0 }] as never)) as unknown as Array<{ count: number }>;
-  return NextResponse.json({ user: u, totalUsers: Number(count ?? 0) });
+  return NextResponse.json(
+    { user: u, totalUsers: Number(count ?? 0) },
+    {
+      // Session check is cheap but happens on every page mount via AppShell —
+      // cache for 5 min in the browser so navigation is instant.
+      headers: { 'Cache-Control': 'private, max-age=300, stale-while-revalidate=3600' },
+    },
+  );
 }
 
 // reference users to satisfy unused-import lint

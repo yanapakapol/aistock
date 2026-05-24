@@ -6,16 +6,19 @@ import { useEffect, useRef, useState } from 'react';
  * Stale-while-revalidate fetch with sessionStorage caching.
  *
  * - On mount: returns cached value INSTANTLY (no spinner) if present.
- * - Always kicks off a background fetch and updates state when fresh data arrives.
- * - Stores per-URL keyed cache under `aistock:cache:<key>`.
+ * - Only kicks off a background fetch if the cached value is OLDER than
+ *   `revalidateAfterMs` (default 60s). Otherwise skips the network call.
+ * - Always returns stale data; never throws away cache on TTL expiry.
+ * - In-flight dedupe: simultaneous mounts share one fetch per URL.
  *
- * This is the antidote to Neon cold-starts + Netlify function spin-up: the
- * user sees the last-known good data immediately while a fresh copy is being
- * fetched, so the page never appears empty.
+ * Antidote to Neon cold-starts + serverless spin-up: the page never appears
+ * empty AND we don't burn DB calls re-asking for things we just got.
  */
+const inflight = new Map<string, Promise<unknown>>();
+
 export function useCachedJson<T>(
   url: string | null,
-  opts?: { ttlMs?: number; storage?: 'session' | 'local' },
+  opts?: { revalidateAfterMs?: number; storage?: 'session' | 'local' },
 ): {
   data: T | null;
   loading: boolean;
@@ -23,28 +26,39 @@ export function useCachedJson<T>(
   refetch: () => void;
 } {
   const storageKind = opts?.storage ?? 'session';
-  const ttl = opts?.ttlMs ?? 60_000;
+  const revalidateAfter = opts?.revalidateAfterMs ?? 60_000;
   const cacheKey = url ? `aistock:cache:${url}` : null;
 
-  const [data, setData] = useState<T | null>(() => readCache<T>(cacheKey, storageKind, ttl));
+  const [data, setData] = useState<T | null>(() => readCacheValue<T>(cacheKey, storageKind));
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const tick = useRef(0);
 
-  function trigger() {
-    if (!url) return;
+  function trigger(force = false) {
+    if (!url || !cacheKey) return;
+    const meta = readCacheMeta(cacheKey, storageKind);
+    if (!force && meta && Date.now() - meta.ts < revalidateAfter) {
+      // Fresh enough — skip network entirely.
+      return;
+    }
     const myTick = ++tick.current;
     setLoading(true);
     setError(null);
-    fetch(url)
-      .then(async (r) => {
-        if (myTick !== tick.current) return;
+    // Dedupe concurrent requests across components.
+    let p = inflight.get(url) as Promise<T> | undefined;
+    if (!p) {
+      p = fetch(url).then(async (r) => {
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
-        const j = (await r.json()) as T;
-        if (myTick !== tick.current) return;
-        setData(j);
-        writeCache(cacheKey, j, storageKind);
-      })
+        return (await r.json()) as T;
+      });
+      inflight.set(url, p);
+      p.finally(() => inflight.delete(url));
+    }
+    p.then((j) => {
+      if (myTick !== tick.current) return;
+      setData(j);
+      writeCache(cacheKey, j, storageKind);
+    })
       .catch((e) => {
         if (myTick !== tick.current) return;
         setError(e instanceof Error ? e.message : String(e));
@@ -56,12 +70,12 @@ export function useCachedJson<T>(
   }
 
   useEffect(() => {
-    setData(readCache<T>(cacheKey, storageKind, ttl));
-    trigger();
+    setData(readCacheValue<T>(cacheKey, storageKind));
+    trigger(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [url]);
 
-  return { data, loading, error, refetch: trigger };
+  return { data, loading, error, refetch: () => trigger(true) };
 }
 
 function storage(kind: 'session' | 'local'): Storage | null {
@@ -69,11 +83,7 @@ function storage(kind: 'session' | 'local'): Storage | null {
   return kind === 'session' ? window.sessionStorage : window.localStorage;
 }
 
-function readCache<T>(
-  key: string | null,
-  kind: 'session' | 'local',
-  ttl: number,
-): T | null {
+function readCacheValue<T>(key: string | null, kind: 'session' | 'local'): T | null {
   if (!key) return null;
   const s = storage(kind);
   if (!s) return null;
@@ -81,8 +91,21 @@ function readCache<T>(
     const raw = s.getItem(key);
     if (!raw) return null;
     const parsed = JSON.parse(raw) as { ts: number; v: T };
-    if (Date.now() - parsed.ts > ttl) return parsed.v; // still return stale, just trigger refetch
     return parsed.v;
+  } catch {
+    return null;
+  }
+}
+
+function readCacheMeta(key: string | null, kind: 'session' | 'local'): { ts: number } | null {
+  if (!key) return null;
+  const s = storage(kind);
+  if (!s) return null;
+  try {
+    const raw = s.getItem(key);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as { ts: number };
+    return { ts: parsed.ts };
   } catch {
     return null;
   }

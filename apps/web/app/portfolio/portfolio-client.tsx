@@ -103,20 +103,41 @@ export function PortfolioClient() {
   }, [loadStocks]);
 
   const loadPrices = useCallback(async (stockId: string, r: Range) => {
+    const from = isoOffset(RANGE_DAYS[r]);
+    const to = todayIso();
+    const url = `/api/portfolio/${encodeURIComponent(stockId)}/prices?from=${from}&to=${to}`;
+    const cacheKey = `aistock:cache:${url}`;
+    // Show cached prices instantly so the chart doesn't blank on range change.
+    try {
+      const raw = sessionStorage.getItem(cacheKey);
+      if (raw) {
+        const parsed = JSON.parse(raw) as { ts: number; v: { rows: PriceRow[] } };
+        // Use cached data if < 5 minutes old; otherwise still show stale + refetch.
+        if (parsed?.v?.rows) {
+          setPrices(parsed.v.rows);
+          if (Date.now() - parsed.ts < 5 * 60_000) {
+            setLoadingPrices(false);
+            return;
+          }
+        }
+      }
+    } catch {
+      /* ignore */
+    }
     setLoadingPrices(true);
     setPriceErr(null);
     try {
-      const from = isoOffset(RANGE_DAYS[r]);
-      const to = todayIso();
-      const res = await fetch(
-        `/api/portfolio/${encodeURIComponent(stockId)}/prices?from=${from}&to=${to}`,
-      );
+      const res = await fetch(url);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const j = (await res.json()) as { rows: PriceRow[] };
       setPrices(j.rows ?? []);
+      try {
+        sessionStorage.setItem(cacheKey, JSON.stringify({ ts: Date.now(), v: j }));
+      } catch {
+        /* quota */
+      }
     } catch (e) {
       setPriceErr(e instanceof Error ? e.message : 'Failed to load prices');
-      setPrices([]);
     } finally {
       setLoadingPrices(false);
     }

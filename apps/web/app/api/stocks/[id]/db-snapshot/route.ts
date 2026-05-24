@@ -135,5 +135,9 @@ export async function GET(
       research_notes: notesCount[0]?.count ?? 0,
       business_context_chunks: ctxChunksCount[0]?.count ?? 0,
     },
-  });
+    },
+    {
+      headers: { 'Cache-Control': 'private, max-age=60, stale-while-revalidate=600' },
+    },
+  );
 }

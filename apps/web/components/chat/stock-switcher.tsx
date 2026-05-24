@@ -31,7 +31,7 @@ export function StockSwitcher({ value, onChange, className }: Props) {
   // SWR: instant from sessionStorage, refresh in background.
   const { data, loading, error } = useCachedJson<{ stocks: PortfolioStock[] }>(
     '/api/portfolio',
-    { ttlMs: 30_000 },
+    { revalidateAfterMs: 60_000 },
   );
   const stocks = data?.stocks ?? [];
   const err = error;
