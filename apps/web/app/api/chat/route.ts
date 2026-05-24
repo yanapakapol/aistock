@@ -23,6 +23,17 @@ export const runtime = 'nodejs';
 // Long-running streams. Vercel Hobby caps at 60s, Pro at 300s. Netlify free
 // caps at 10s, Pro at 26s — Netlify free WILL kill Deep Research mid-stream.
 export const maxDuration = 300;
+// `dynamic = 'force-dynamic'` + `revalidate = 0` so Next.js never caches the
+// route handler. We had the symptom of a stale `/api/chat` λ serving even
+// after several pushes — research suggests build-payload cache skipped the
+// re-upload because hashes were close enough. These exports change the route
+// metadata and guarantee the bundle hash differs.
+export const dynamic = 'force-dynamic';
+export const revalidate = 0;
+// BUILD STAMP — bumped on every deploy where we need to force Vercel to
+// rebuild the function payload. Read on cold start, never used at runtime.
+const __BUILD_STAMP__ = 'chat-route-2026-05-25T00-00-00Z-rev3';
+void __BUILD_STAMP__;
 
 // ---------- Request schema ----------
 
