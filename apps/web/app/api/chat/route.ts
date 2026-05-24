@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { streamText, generateText, convertToModelMessages, type ModelMessage } from 'ai';
 
 import { db } from '@/lib/db/client';
-import { chats, chatMessages, outboundAudit, stocks, type messageRoleEnum } from '@/lib/db/schema';
+import { chats, chatMessages, outboundAudit, stocks, users, type messageRoleEnum } from '@/lib/db/schema';
 import { eq } from 'drizzle-orm';
 
 import { PROVIDERS, LLM_HOSTS, type Provider } from '@/lib/llm/providers';
@@ -16,6 +16,8 @@ import { toAiSdkTool } from '@/lib/mcp/adapters/aiSdk';
 import { scrubSecrets, sanitizeError } from '@/lib/security/scrub';
 import { meter } from '@/lib/cost/meter';
 import { addSpend, checkBudgetOrThrow } from '@/lib/cost/ledger';
+import { getUserDailyUsage, addUserDailyUsage } from '@/lib/cost/userUsage';
+import { getCurrentUser } from '@/lib/auth/session';
 
 export const runtime = 'nodejs';
 // Long-running streams. Vercel Hobby caps at 60s, Pro at 300s. Netlify free
@@ -165,6 +167,55 @@ export async function POST(req: NextRequest) {
   const sfs = req.headers.get('sec-fetch-site');
   if (sfs && sfs !== 'same-origin' && sfs !== 'none') {
     return NextResponse.json({ error: 'cross-site blocked' }, { status: 403 });
+  }
+
+  // ---- AuthN + per-user daily cap gate ----
+  // getCurrentUser() returns the trimmed projection (id/username/isAdmin); we
+  // do a second tiny select here to pick up the per-user caps that the schema
+  // owner added (daily_token_cap, daily_usd_cap). NULL on either means
+  // "unlimited for this user".
+  const sessionUser = await getCurrentUser();
+  if (!sessionUser) {
+    return NextResponse.json({ error: 'unauthorized' }, { status: 401 });
+  }
+  const [userCaps] = await db
+    .select({
+      id: users.id,
+      role: users.role,
+      dailyTokenCap: users.dailyTokenCap,
+      dailyUsdCap: users.dailyUsdCap,
+    })
+    .from(users)
+    .where(eq(users.id, sessionUser.id))
+    .limit(1);
+  if (!userCaps) {
+    // Session pointed at a now-deleted user. Treat as logged-out.
+    return NextResponse.json({ error: 'unauthorized' }, { status: 401 });
+  }
+  const userId = userCaps.id;
+  const capTokens =
+    userCaps.dailyTokenCap != null && Number.isFinite(Number(userCaps.dailyTokenCap))
+      ? Number(userCaps.dailyTokenCap)
+      : null;
+  const capUsd =
+    userCaps.dailyUsdCap != null && Number.isFinite(Number(userCaps.dailyUsdCap))
+      ? Number(userCaps.dailyUsdCap)
+      : null;
+  if (capTokens != null || capUsd != null) {
+    const used = await getUserDailyUsage(userId);
+    const usedTokens = used.tokens_in + used.tokens_out;
+    if (capTokens != null && usedTokens >= capTokens) {
+      return NextResponse.json(
+        { error: 'daily token cap reached', usedTokens, capTokens },
+        { status: 429 },
+      );
+    }
+    if (capUsd != null && used.cost_usd >= capUsd) {
+      return NextResponse.json(
+        { error: 'daily USD cap reached', usedUsd: used.cost_usd, capUsd },
+        { status: 429 },
+      );
+    }
   }
 
   let body: z.infer<typeof BodySchema>;
@@ -445,6 +496,17 @@ export async function POST(req: NextRequest) {
         scrubObject(partsToWrite),
       );
       if (costUsd > 0) await addSpend(provider, costUsd);
+      // Per-user daily roll-up. Runs alongside the global per-provider
+      // budget_ledger above; that one caps the provider key, this one caps
+      // the user. Both must exist.
+      try {
+        await addUserDailyUsage(userId, provider, tokensIn, tokensOut, costUsd);
+      } catch (err) {
+        console.error(
+          `[chat] failed to upsert user_token_usage (${reason}):`,
+          sanitizeError(err),
+        );
+      }
     } catch (err) {
       console.error(`[chat] failed to persist assistant (${reason}):`, sanitizeError(err));
     }

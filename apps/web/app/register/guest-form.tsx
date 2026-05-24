@@ -1,37 +1,35 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import Link from 'next/link';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 
-export function LoginForm() {
+export function GuestForm() {
   const router = useRouter();
   const sp = useSearchParams();
   const next = sp?.get('next') ?? '/research';
   const [username, setU] = useState('');
   const [password, setP] = useState('');
+  const [confirm, setC] = useState('');
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const [total, setTotal] = useState<number | null>(null);
-
-  useEffect(() => {
-    fetch('/api/auth/me')
-      .then((r) => r.json())
-      .then((j: { user?: unknown; totalUsers?: number }) => {
-        setTotal(j.totalUsers ?? 0);
-        if (j.user) router.replace(next as never);
-      })
-      .catch(() => undefined);
-  }, [next, router]);
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
     setErr(null);
+    if (password !== confirm) {
+      setErr('passwords do not match');
+      return;
+    }
+    if (password.length < 8) {
+      setErr('password must be at least 8 characters');
+      return;
+    }
     setBusy(true);
     try {
-      const r = await fetch('/api/auth/login', {
+      const r = await fetch('/api/auth/register-guest', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ username, password }),
@@ -54,35 +52,51 @@ export function LoginForm() {
       className="w-full max-w-sm space-y-4 rounded-lg border border-border bg-muted/10 p-6"
     >
       <div>
-        <h1 className="text-lg font-semibold">Sign in to aistock</h1>
+        <h1 className="text-lg font-semibold">Create a guest account</h1>
         <p className="mt-1 text-xs text-muted-foreground">
-          {total === 0
-            ? 'No accounts yet — register the first one to become admin.'
-            : 'Or '}
-          {total !== 0 ? (
-            <Link className="text-blue-400 underline" href={`/register?next=${encodeURIComponent(next)}`}>
-              create an account
-            </Link>
-          ) : null}
+          Guest account — uses admin&apos;s API keys with a daily token cap. Your data is cleared
+          every 7 days but your username stays.
         </p>
       </div>
       <div className="space-y-1">
         <label className="text-xs text-muted-foreground" htmlFor="u">
           Username
         </label>
-        <Input id="u" value={username} onChange={(e) => setU(e.target.value)} autoComplete="username" required />
+        <Input
+          id="u"
+          value={username}
+          onChange={(e) => setU(e.target.value)}
+          autoComplete="username"
+          required
+          minLength={3}
+        />
       </div>
       <div className="space-y-1">
         <label className="text-xs text-muted-foreground" htmlFor="p">
-          Password
+          Password (min 8 chars)
         </label>
         <Input
           id="p"
           type="password"
           value={password}
           onChange={(e) => setP(e.target.value)}
-          autoComplete="current-password"
+          autoComplete="new-password"
           required
+          minLength={8}
+        />
+      </div>
+      <div className="space-y-1">
+        <label className="text-xs text-muted-foreground" htmlFor="c">
+          Confirm password
+        </label>
+        <Input
+          id="c"
+          type="password"
+          value={confirm}
+          onChange={(e) => setC(e.target.value)}
+          autoComplete="new-password"
+          required
+          minLength={8}
         />
       </div>
       {err ? <div className="text-xs text-red-500">{err}</div> : null}
@@ -91,25 +105,12 @@ export function LoginForm() {
           href={`/register?next=${encodeURIComponent(next)}`}
           className="text-xs text-muted-foreground underline hover:text-foreground"
         >
-          {total === 0 ? 'Register first user →' : 'Register'}
+          Full account instead
         </Link>
         <Button type="submit" size="sm" disabled={busy || !username || !password}>
-          {busy ? 'Signing in…' : 'Sign in'}
+          {busy ? 'Creating…' : 'Create guest account'}
         </Button>
       </div>
-      {total !== 0 ? (
-        <div className="border-t border-border pt-3 text-center">
-          <Link
-            href={`/register?guest=1&next=${encodeURIComponent(next)}`}
-            className="text-xs text-blue-400 underline hover:text-blue-300"
-          >
-            Sign up as guest
-          </Link>
-          <p className="mt-1 text-[10px] text-muted-foreground">
-            Uses admin&apos;s API keys with a daily cap. Data wiped every 7 days.
-          </p>
-        </div>
-      ) : null}
     </form>
   );
 }

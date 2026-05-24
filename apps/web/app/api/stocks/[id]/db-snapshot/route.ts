@@ -1,3 +1,10 @@
+// Connection-pool note: `@/lib/db/client` exports a singleton `postgres()` pool
+// (max=10) cached on globalThis. Every `db.select(...)` here borrows from that
+// same pool — Drizzle does NOT open a new TCP connection per query. The 8
+// queries in the Promise.all below execute on (up to) 8 pooled connections
+// concurrently and return them on completion. Do not import `postgres` or
+// `drizzle` directly elsewhere — always go through `@/lib/db/client` so we
+// stay under Neon's connection limit.
 import { NextResponse, type NextRequest } from 'next/server';
 import { desc, eq, sql } from 'drizzle-orm';
 import { db } from '@/lib/db/client';
@@ -29,9 +36,14 @@ export const runtime = 'nodejs';
  *   rag_counts           — chunk counts per RAG table
  */
 export async function GET(
-  _req: NextRequest,
+  req: NextRequest,
   { params }: { params: Promise<{ id: string }> },
 ) {
+  // ?fields=full returns the verbose legacy shape (stock_id, event_ts,
+  // date_precision, sentiment_score, probability_negative, created_at, etc.).
+  // Default omits those — they aren't rendered by db-snapshot-panel or any
+  // tool renderer, and dropping them ~halves the payload on chatty stocks.
+  const wantsFull = req.nextUrl.searchParams.get('fields') === 'full';
   const id = Number((await params).id);
   if (!Number.isFinite(id) || id <= 0) {
     return NextResponse.json({ error: 'bad id' }, { status: 400 });
@@ -82,46 +94,80 @@ export async function GET(
   // <DbEventsBlock /> etc. work for both pipelines.
   return NextResponse.json({
     stock,
-    events: eventsRows.map((r) => ({
-      id: r.id,
-      stock_id: r.stockId,
-      event_date: r.eventDate,
-      event_ts: r.eventTs,
-      event_tz: r.eventTz,
-      date_precision: r.datePrecision,
-      session_relative: r.sessionRelative,
-      title: r.title,
-      summary_md: r.summaryMd,
-      source_url: r.sourceUrl,
-      source_title: r.sourceTitle,
-      sentiment_label: r.sentimentLabel,
-      sentiment_score: r.sentimentScore == null ? null : Number(r.sentimentScore),
-      created_at: r.createdAt,
-    })),
-    future_events: futureRows.map((r) => ({
-      id: r.id,
-      stock_id: r.stockId,
-      expected_date: r.expectedDate,
-      date_precision: r.datePrecision,
-      title: r.title,
-      description_md: r.descriptionMd,
-      probability_positive:
-        r.probabilityPositive == null ? null : Number(r.probabilityPositive),
-      probability_negative:
-        r.probabilityNegative == null ? null : Number(r.probabilityNegative),
-      expected_impact_pct:
-        r.expectedImpactPct == null ? null : Number(r.expectedImpactPct),
-      source_urls: r.sourceUrls,
-      created_at: r.createdAt,
-    })),
+    events: eventsRows.map((r) =>
+      wantsFull
+        ? {
+            id: r.id,
+            stock_id: r.stockId,
+            event_date: r.eventDate,
+            event_ts: r.eventTs,
+            event_tz: r.eventTz,
+            date_precision: r.datePrecision,
+            session_relative: r.sessionRelative,
+            title: r.title,
+            summary_md: r.summaryMd,
+            source_url: r.sourceUrl,
+            source_title: r.sourceTitle,
+            sentiment_label: r.sentimentLabel,
+            sentiment_score: r.sentimentScore == null ? null : Number(r.sentimentScore),
+            created_at: r.createdAt,
+          }
+        : {
+            // Narrow shape — only fields the renderer actually reads.
+            id: r.id,
+            event_date: r.eventDate,
+            title: r.title,
+            summary_md: r.summaryMd,
+            source_url: r.sourceUrl,
+            source_title: r.sourceTitle,
+            sentiment_label: r.sentimentLabel,
+          },
+    ),
+    future_events: futureRows.map((r) =>
+      wantsFull
+        ? {
+            id: r.id,
+            stock_id: r.stockId,
+            expected_date: r.expectedDate,
+            date_precision: r.datePrecision,
+            title: r.title,
+            description_md: r.descriptionMd,
+            probability_positive:
+              r.probabilityPositive == null ? null : Number(r.probabilityPositive),
+            probability_negative:
+              r.probabilityNegative == null ? null : Number(r.probabilityNegative),
+            expected_impact_pct:
+              r.expectedImpactPct == null ? null : Number(r.expectedImpactPct),
+            source_urls: r.sourceUrls,
+            created_at: r.createdAt,
+          }
+        : {
+            id: r.id,
+            expected_date: r.expectedDate,
+            title: r.title,
+            description_md: r.descriptionMd,
+            probability_positive:
+              r.probabilityPositive == null ? null : Number(r.probabilityPositive),
+            expected_impact_pct:
+              r.expectedImpactPct == null ? null : Number(r.expectedImpactPct),
+            source_urls: r.sourceUrls,
+          },
+    ),
     business_context: ctxRow[0]
-      ? {
-          stock_id: ctxRow[0].stockId,
-          summary_md: ctxRow[0].summaryMd,
-          timeline_md: ctxRow[0].timelineMd,
-          future_outlook_md: ctxRow[0].futureOutlookMd,
-          updated_at: ctxRow[0].updatedAt,
-        }
+      ? wantsFull
+        ? {
+            stock_id: ctxRow[0].stockId,
+            summary_md: ctxRow[0].summaryMd,
+            timeline_md: ctxRow[0].timelineMd,
+            future_outlook_md: ctxRow[0].futureOutlookMd,
+            updated_at: ctxRow[0].updatedAt,
+          }
+        : {
+            summary_md: ctxRow[0].summaryMd,
+            timeline_md: ctxRow[0].timelineMd,
+            future_outlook_md: ctxRow[0].futureOutlookMd,
+            updated_at: ctxRow[0].updatedAt,
+          }
       : null,
     research_tasks: tasksRows.map((t) => ({
       id: t.id,

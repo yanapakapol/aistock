@@ -46,22 +46,33 @@ export function HistoryPanel({ tab, stockId, open, onClose, onLoad }: Props) {
   const [err, setErr] = useState<string | null>(null);
   const [purging, setPurging] = useState(false);
 
-  const refresh = useCallback(async () => {
-    setLoading(true);
-    setErr(null);
-    try {
-      const qs = new URLSearchParams({ tab });
-      if (stockId) qs.set('stockId', String(stockId));
-      const r = await fetch(`/api/chats?${qs.toString()}`);
-      if (!r.ok) throw new Error(`HTTP ${r.status}`);
-      const j = (await r.json()) as { chats: ChatRow[] };
-      setChats(j.chats ?? []);
-    } catch (e) {
-      setErr((e as Error).message);
-    } finally {
-      setLoading(false);
-    }
-  }, [tab, stockId]);
+  const fetchChats = useCallback(
+    async (opts?: { bust?: boolean }) => {
+      setLoading(true);
+      setErr(null);
+      try {
+        const qs = new URLSearchParams({ tab });
+        if (stockId) qs.set('stockId', String(stockId));
+        if (opts?.bust) qs.set('_t', String(Date.now()));
+        const r = await fetch(`/api/chats?${qs.toString()}`, {
+          cache: opts?.bust ? 'no-store' : 'default',
+        });
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        const j = (await r.json()) as { chats: ChatRow[] };
+        setChats(j.chats ?? []);
+      } catch (e) {
+        setErr((e as Error).message);
+      } finally {
+        setLoading(false);
+      }
+    },
+    [tab, stockId],
+  );
+
+  // Default open/scope-change load uses the cached path.
+  const refresh = useCallback(() => fetchChats(), [fetchChats]);
+  // Manual Refresh button forces a fresh, uncached fetch.
+  const forceRefresh = useCallback(() => fetchChats({ bust: true }), [fetchChats]);
 
   useEffect(() => {
     if (open) void refresh();
@@ -111,11 +122,23 @@ export function HistoryPanel({ tab, stockId, open, onClose, onLoad }: Props) {
     onClose();
     const url = new URL(window.location.href);
     url.searchParams.set('loadChat', String(id));
-    // Try to keep the active stock URL param right (use the chat's own stock
-    // when present so the chat lands in its proper scope).
+    // Cache-bust the loadChat param so back/forward + reload always re-fetches
+    // the right chat rather than reusing a stale router cache entry.
+    url.searchParams.set('_lc', String(Date.now()));
+    // ALWAYS sync the page's stock scope to the loaded chat's own stockId.
+    // Without this, clicking chat A while viewing stock B leaves the URL on
+    // stock B and the page's persistence layer can then overwrite A with B's
+    // cached messages on next render — that's the "different chat" bug.
     try {
-      const meta = await fetch(`/api/chats/${id}`).then((r) => r.json());
+      const meta = await fetch(`/api/chats/${id}?_t=${Date.now()}`, { cache: 'no-store' }).then(
+        (r) => r.json(),
+      );
       const sid = meta?.chat?.stockId;
+      // research uses ?stock=<numeric-id>; analysis uses ?stock=<symbol>.
+      // We only know the id here, so we only rewrite for research. For
+      // analysis the user's currently-selected symbol stays — analysis chats
+      // are still uniquely keyed by chatId via ?loadChat= so the right
+      // messages get loaded regardless.
       if (sid != null && tab === 'research') {
         url.searchParams.set('stock', String(sid));
       }
@@ -158,7 +181,12 @@ export function HistoryPanel({ tab, stockId, open, onClose, onLoad }: Props) {
   return (
     <div className="absolute inset-y-0 right-0 z-30 flex w-full max-w-full flex-col border-l border-border bg-background shadow-lg sm:w-96">
       <div className="flex items-center justify-between border-b border-border px-3 py-2">
-        <div className="text-sm font-semibold">Chat history</div>
+        <div className="flex min-w-0 flex-col">
+          <div className="text-sm font-semibold">Chat history</div>
+          <div className="truncate text-[10px] text-muted-foreground">
+            scope: {tab} · {stockId ? `stock #${stockId}` : 'all stocks (yours)'}
+          </div>
+        </div>
         <button
           type="button"
           onClick={onClose}
@@ -169,7 +197,7 @@ export function HistoryPanel({ tab, stockId, open, onClose, onLoad }: Props) {
         </button>
       </div>
       <div className="flex items-center gap-2 border-b border-border px-3 py-2">
-        <Button size="sm" variant="outline" onClick={refresh} disabled={loading}>
+        <Button size="sm" variant="outline" onClick={forceRefresh} disabled={loading}>
           Refresh
         </Button>
         <Button size="sm" variant="outline" onClick={purgeSimulated} disabled={purging}>

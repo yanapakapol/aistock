@@ -15,6 +15,9 @@ const csp = [
 const config: NextConfig = {
   reactStrictMode: true,
   output: 'standalone',
+  // Gzip text/JSON responses. Redundant on Vercel (edge already compresses) but
+  // load-bearing on self-hosted / Oracle Cloud + Node server.
+  compress: true,
   serverExternalPackages: [
     '@primno/dpapi',
     'node-gyp-build',

@@ -1,9 +1,14 @@
 import { NextResponse, type NextRequest } from 'next/server';
+import { revalidateTag } from 'next/cache';
 import { z } from 'zod';
 import { and, eq } from 'drizzle-orm';
 import { db } from '@/lib/db/client';
 import { stocks } from '@/lib/db/schema';
-import { getDefaultPortfolioId, listStocks } from '@/lib/portfolio/queries';
+import {
+  getDefaultPortfolioId,
+  listStocks,
+  listStocksFull,
+} from '@/lib/portfolio/queries';
 
 export const runtime = 'nodejs';
 
@@ -32,8 +37,11 @@ function requireSameOrigin(req: NextRequest) {
   }
 }
 
-export async function GET() {
-  const rows = await listStocks();
+export async function GET(req: NextRequest) {
+  // ?fields=full opts into the legacy shape (portfolioId + mic). Default is
+  // the narrow shape (~25% smaller payload, scales with watchlist size).
+  const wantsFull = req.nextUrl.searchParams.get('fields') === 'full';
+  const rows = wantsFull ? await listStocksFull() : await listStocks();
   return NextResponse.json({ stocks: rows }, { headers: SWR_HEADERS });
 }
 
@@ -72,6 +80,7 @@ export async function POST(req: NextRequest) {
         mic: mic ?? null,
       })
       .returning();
+    revalidateTag('portfolio');
     return NextResponse.json({ stock: inserted[0], created: true }, { status: 201 });
   } catch (err) {
     return NextResponse.json(
@@ -97,5 +106,6 @@ export async function DELETE(req: NextRequest) {
   if (result.length === 0) {
     return NextResponse.json({ error: 'not found' }, { status: 404 });
   }
+  revalidateTag('portfolio');
   return NextResponse.json({ ok: true, deletedId: result[0].id });
 }

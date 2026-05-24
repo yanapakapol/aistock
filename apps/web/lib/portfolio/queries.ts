@@ -1,4 +1,5 @@
 import 'server-only';
+import { unstable_cache } from 'next/cache';
 import { eq, desc } from 'drizzle-orm';
 import { db } from '@/lib/db/client';
 import { portfolios, stocks } from '@/lib/db/schema';
@@ -27,7 +28,35 @@ export async function getDefaultPortfolioId(): Promise<number> {
   });
 }
 
-export async function listStocks() {
+// Watchlist barely changes mid-session. Wrap with the Next 15 data cache so
+// repeat GET /api/portfolio (header refresh, AppShell mount, history panel
+// open, etc.) skip Postgres entirely for 60s. Mutating endpoints
+// (POST/DELETE /api/portfolio) revalidate via `revalidateTag('portfolio')`.
+//
+// NOTE: We deliberately do NOT select portfolioId or mic — neither is rendered
+// in the UI. Saves bytes on every list call. If a future caller needs them,
+// add `?fields=full`.
+async function listStocksRaw() {
+  return await db
+    .select({
+      id: stocks.id,
+      symbol: stocks.symbol,
+      exchange: stocks.exchange,
+      name: stocks.name,
+      currency: stocks.currency,
+      addedAt: stocks.addedAt,
+    })
+    .from(stocks)
+    .orderBy(desc(stocks.addedAt));
+}
+
+export const listStocks = unstable_cache(listStocksRaw, ['portfolio:list-stocks'], {
+  revalidate: 60,
+  tags: ['portfolio'],
+});
+
+/** Full row including portfolioId + mic. Use only when a caller actually needs them. */
+export async function listStocksFull() {
   return await db
     .select({
       id: stocks.id,

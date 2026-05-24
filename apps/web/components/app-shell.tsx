@@ -4,7 +4,7 @@ import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { useEffect, useState } from 'react';
 import { cn } from '@/lib/utils';
-import { Search, Sparkles, Clock, Wallet, Settings, Menu, X, LogOut } from 'lucide-react';
+import { Search, Sparkles, Clock, Wallet, Settings, Menu, X, LogOut, Users } from 'lucide-react';
 import { ThemeToggle } from '@/components/theme-toggle';
 
 const nav = [
@@ -15,16 +15,27 @@ const nav = [
   { href: '/settings', label: 'Settings', icon: Settings },
 ] as const;
 
+// Nav items only shown when the session belongs to an admin. Kept separate so
+// non-admin renders skip them entirely (the gate is also enforced server-side
+// in the page itself and at every /api/admin/* endpoint — this is purely UX).
+const adminNav = [
+  { href: '/admin/users', label: 'Users', icon: Users },
+] as const;
+
 export function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const [menuOpen, setMenuOpen] = useState(false);
   const [me, setMe] = useState<{ username: string; isAdmin: boolean } | null>(null);
+  // Fire ONCE on mount — not on every pathname change. The response carries
+  // Cache-Control: private, max-age=300, so logout/login changes are picked up
+  // within 5 min anyway (and logout/login itself hard-navigates). Cuts one DB
+  // call per client-side navigation.
   useEffect(() => {
     fetch('/api/auth/me')
       .then((r) => r.json())
       .then((j: { user?: { username: string; isAdmin: boolean } | null }) => setMe(j.user ?? null))
       .catch(() => undefined);
-  }, [pathname]);
+  }, []);
   async function logout() {
     await fetch('/api/auth/logout', { method: 'POST', headers: { 'content-type': 'application/json' } });
     window.location.href = '/login';
@@ -79,6 +90,24 @@ export function AppShell({ children }: { children: React.ReactNode }) {
               </Link>
             );
           })}
+          {me?.isAdmin
+            ? adminNav.map(({ href, label, icon: Icon }) => {
+                const active = pathname === href || pathname.startsWith(`${href}/`);
+                return (
+                  <Link
+                    key={href}
+                    href={href}
+                    className={cn(
+                      'flex items-center gap-2 rounded-md px-2 py-1.5 text-sm text-muted-foreground hover:bg-accent hover:text-foreground',
+                      active && 'bg-accent text-foreground',
+                    )}
+                  >
+                    <Icon className="h-4 w-4" />
+                    {label}
+                  </Link>
+                );
+              })
+            : null}
         </nav>
         {me ? (
           <div className="mt-auto border-t border-border pt-3">

@@ -1,4 +1,5 @@
 import 'server-only';
+import { unstable_cache, revalidateTag } from 'next/cache';
 import { sql } from 'drizzle-orm';
 import { db } from '@/lib/db/client';
 import { modelsCache } from '@/lib/db/schema';
@@ -47,20 +48,29 @@ function mergePricing(provider: Provider, live: ModelInfo[]): ModelInfo[] {
   });
 }
 
-async function readCache(provider: Provider): Promise<ModelInfo[] | null> {
-  try {
-    const cutoff = new Date(Date.now() - CACHE_TTL_MS);
-    const rows = await db
-      .select()
-      .from(modelsCache)
-      .where(sql`provider = ${provider} AND fetched_at > ${cutoff}`);
-    if (!rows.length) return null;
-    return rows.map((r) => r.payload as ModelInfo);
-  } catch {
-    // DB unreachable / table missing → silently degrade to fallback.
-    return null;
-  }
-}
+// In-process memoization on top of the Postgres-backed cache. The model list
+// changes ~daily (24h TTL on writes) but `/api/models` is hit on every chat
+// page mount AND every model dropdown open. unstable_cache (Next 15 data
+// cache) collapses identical reads within the 60s window to a single DB query
+// across all routes on the same server.
+const readCache = unstable_cache(
+  async (provider: Provider): Promise<ModelInfo[] | null> => {
+    try {
+      const cutoff = new Date(Date.now() - CACHE_TTL_MS);
+      const rows = await db
+        .select()
+        .from(modelsCache)
+        .where(sql`provider = ${provider} AND fetched_at > ${cutoff}`);
+      if (!rows.length) return null;
+      return rows.map((r) => r.payload as ModelInfo);
+    } catch {
+      // DB unreachable / table missing → silently degrade to fallback.
+      return null;
+    }
+  },
+  ['llm:models-cache:read'],
+  { revalidate: 60, tags: ['llm-models'] },
+);
 
 async function writeCache(provider: Provider, models: ModelInfo[]) {
   try {

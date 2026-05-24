@@ -83,6 +83,31 @@ async function main() {
   await sql`DROP INDEX IF EXISTS api_keys_provider_uq`;
   await sql`CREATE UNIQUE INDEX IF NOT EXISTS api_keys_user_provider_uq ON api_keys (user_id, provider)`;
 
+  // ---- RBAC + per-user caps (additive; existing data untouched) ----
+  // 1. Enum type. duplicate_object guard so re-runs are no-ops.
+  await sql`DO $$ BEGIN
+    CREATE TYPE user_role AS ENUM ('admin','user','guest');
+  EXCEPTION WHEN duplicate_object THEN null; END $$;`;
+  // 2. New columns on users. All NULL-safe / defaulted so existing rows survive.
+  await sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS role user_role NOT NULL DEFAULT 'user'`;
+  await sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS daily_token_cap integer`;
+  await sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS daily_usd_cap numeric(8,4)`;
+  await sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS expires_at timestamptz`;
+  // 3. Backfill role from legacy is_admin flag. Only touches rows still at the
+  //    default 'user' so re-running after manual edits stays safe.
+  await sql`UPDATE users SET role = 'admin' WHERE is_admin = true AND role = 'user'`;
+
+  // ---- Per-user daily token / cost usage roll-up ----
+  await sql`CREATE TABLE IF NOT EXISTS user_token_usage (
+    day date NOT NULL,
+    user_id integer NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    provider text NOT NULL,
+    tokens_in integer NOT NULL DEFAULT 0,
+    tokens_out integer NOT NULL DEFAULT 0,
+    cost_usd numeric(10,6) NOT NULL DEFAULT 0,
+    PRIMARY KEY (day, user_id, provider)
+  )`;
+
   // chat_summaries — ad-hoc create so users don't need to re-run db:generate
   // when this table was added after the initial schema snapshot.
   await sql`CREATE TABLE IF NOT EXISTS chat_summaries (

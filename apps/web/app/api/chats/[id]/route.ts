@@ -1,7 +1,10 @@
+// TODO: schema needs `chats.user_id` for true per-user isolation. Until then we
+// authorize via the stock → portfolio → user chain (see ../route.ts).
 import { NextResponse, type NextRequest } from 'next/server';
-import { asc, eq } from 'drizzle-orm';
+import { and, asc, eq, sql } from 'drizzle-orm';
 import { db } from '@/lib/db/client';
-import { chats, chatMessages } from '@/lib/db/schema';
+import { chats, chatMessages, portfolios, stocks } from '@/lib/db/schema';
+import { getCurrentUser } from '@/lib/auth/session';
 
 export const runtime = 'nodejs';
 
@@ -10,12 +13,27 @@ export async function GET(
   _req: NextRequest,
   { params }: { params: Promise<{ id: string }> },
 ) {
+  const me = await getCurrentUser();
+  if (!me) return NextResponse.json({ error: 'unauthorized' }, { status: 401 });
+
   const { id: raw } = await params;
   const id = Number(raw);
   if (!Number.isFinite(id) || id <= 0) {
     return NextResponse.json({ error: 'bad id' }, { status: 400 });
   }
-  const [chat] = await db.select().from(chats).where(eq(chats.id, id)).limit(1);
+  // Fetch the chat AND assert ownership in one round-trip. Either the chat has
+  // no stock (global — currently shared, see TODO) OR its stock belongs to me.
+  const ownedByMe = sql`EXISTS (
+    SELECT 1 FROM ${stocks} s
+    JOIN ${portfolios} p ON p.id = s.portfolio_id
+    WHERE s.id = ${chats.stockId} AND p.user_id = ${me.id}
+  )`;
+  const [chat] = await db
+    .select()
+    .from(chats)
+    .where(and(eq(chats.id, id), ownedByMe))
+    .limit(1);
+  // Return 404 (not 403) so we don't leak existence of someone else's chat.
   if (!chat) return NextResponse.json({ error: 'not found' }, { status: 404 });
   // The `parts` column was added after the initial schema snapshot. If the
   // user hasn't re-run db:migrate yet, fall back to the legacy column set so

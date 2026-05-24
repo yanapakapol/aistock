@@ -3,6 +3,7 @@ import { Cron } from 'croner';
 import { eq } from 'drizzle-orm';
 import { db } from '../db/client';
 import { routines } from '../db/schema';
+import { cleanupExpiredGuestData } from '../auth/guest-cleanup';
 import { computeCatchupBatch, enumerateMissedFires } from './catchup';
 import { runRoutineById } from './runner';
 import type { ScheduledRoutine } from './types';
@@ -32,6 +33,8 @@ export class Scheduler {
   private jobs = new Map<number, Cron>();
   /** Set true after first start() so subsequent reload()s work without re-running catch-up. */
   private started = false;
+  /** Daily guest-data cleanup cron (separate from user routines). */
+  private guestCleanupJob: Cron | null = null;
 
   /**
    * Boot the scheduler: catch up on missed fires for each enabled routine
@@ -61,6 +64,12 @@ export class Scheduler {
     for (const r of all) {
       this.arm(r);
     }
+
+    // 3. Arm the daily guest cleanup. Tolerated as a soft failure — if the
+    //    scheduler isn't running (dev/instrumentation no-op), nothing here
+    //    is reached anyway. We isolate it from routine arming so a bad
+    //    cron string here cannot break user routines.
+    this.armGuestCleanup();
   }
 
   /** Stop every armed cron. Safe to call multiple times. */
@@ -73,7 +82,46 @@ export class Scheduler {
       }
     }
     this.jobs.clear();
+    if (this.guestCleanupJob) {
+      try {
+        this.guestCleanupJob.stop();
+      } catch (err) {
+        logError('error stopping guest cleanup cron:', err);
+      }
+      this.guestCleanupJob = null;
+    }
     this.started = false;
+  }
+
+  /**
+   * Arm the daily 03:00 UTC guest-data cleanup. Safe-by-construction:
+   * any throw is swallowed so a misconfig here cannot stop user routines.
+   */
+  private armGuestCleanup(): void {
+    try {
+      this.guestCleanupJob = new Cron(
+        '0 3 * * *',
+        {
+          timezone: 'UTC',
+          protect: true,
+          catch: (err) => logError('guest cleanup cron error:', err),
+        },
+        () => {
+          cleanupExpiredGuestData()
+            .then((summary) => {
+              if (summary.usersReset > 0 || summary.rowsDeleted > 0) {
+                log(
+                  `guest cleanup: usersReset=${summary.usersReset} rowsDeleted=${summary.rowsDeleted}`,
+                );
+              }
+            })
+            .catch((err) => logError('guest cleanup threw:', err));
+        },
+      );
+      log("armed guest cleanup cron='0 3 * * *' tz=UTC");
+    } catch (err) {
+      logError('failed to arm guest cleanup cron:', err);
+    }
   }
 
   /**

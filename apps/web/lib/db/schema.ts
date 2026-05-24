@@ -65,6 +65,7 @@ export const routineStatusEnum = pgEnum('routine_status', [
   'skipped',
 ]);
 export const messageRoleEnum = pgEnum('message_role', ['user', 'assistant', 'system', 'tool']);
+export const userRoleEnum = pgEnum('user_role', ['admin', 'user', 'guest']);
 
 // ---------- Auth / users ----------
 
@@ -74,11 +75,39 @@ export const users = pgTable(
     id: serial('id').primaryKey(),
     username: text('username').notNull(),
     passwordHash: text('password_hash').notNull(),
+    // Kept for backwards-compat. New code reads/writes `role` instead.
     isAdmin: boolean('is_admin').notNull().default(false),
+    // RBAC: 'admin' | 'user' | 'guest'. Backfilled from is_admin during migrate.
+    role: userRoleEnum('role').notNull().default('user'),
+    // Per-user daily caps. NULL = unlimited.
+    dailyTokenCap: integer('daily_token_cap'),
+    dailyUsdCap: numeric('daily_usd_cap', { precision: 8, scale: 4 }),
+    // Guest accounts get now()+7d here; admin/user stay NULL. Cleanup cron uses
+    // this to wipe guest *data* (portfolios, chats, keys) — not the row itself.
+    expiresAt: timestamp('expires_at', { withTimezone: true }),
     createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
   },
   (t) => ({
     byUsername: uniqueIndex('users_username_uq').on(t.username),
+  }),
+);
+
+// ---------- Per-user daily token / cost usage roll-up ----------
+
+export const userTokenUsage = pgTable(
+  'user_token_usage',
+  {
+    day: date('day').notNull(),
+    userId: integer('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    provider: text('provider').notNull(),
+    tokensIn: integer('tokens_in').notNull().default(0),
+    tokensOut: integer('tokens_out').notNull().default(0),
+    costUsd: numeric('cost_usd', { precision: 10, scale: 6 }).notNull().default('0'),
+  },
+  (t) => ({
+    pk: primaryKey({ columns: [t.day, t.userId, t.provider] }),
   }),
 );
 

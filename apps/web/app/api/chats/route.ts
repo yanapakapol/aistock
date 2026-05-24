@@ -1,28 +1,61 @@
+// TODO: schema needs `chats.user_id` for true per-user isolation. Until then we
+// scope chats via the stock → portfolio → user chain (a chat is "yours" iff its
+// stockId belongs to a stock under a portfolio you own). Chats with
+// stockId IS NULL have NO user link at all — they are returned ONLY when the
+// caller explicitly opts in via ?includeGlobal=1, otherwise they are hidden.
 import { NextResponse, type NextRequest } from 'next/server';
 import { z } from 'zod';
-import { and, desc, eq, ilike, or, sql } from 'drizzle-orm';
+import { and, desc, eq, ilike, isNull, or, sql } from 'drizzle-orm';
 import { db } from '@/lib/db/client';
-import { chats, chatMessages } from '@/lib/db/schema';
+import { chats, chatMessages, portfolios, stocks } from '@/lib/db/schema';
+import { getCurrentUser } from '@/lib/auth/session';
 
 export const runtime = 'nodejs';
 
 const Query = z.object({
   tab: z.enum(['research', 'analysis']).optional(),
   stockId: z.coerce.number().int().positive().optional(),
+  includeGlobal: z.enum(['0', '1']).optional(),
 });
 
-/** GET /api/chats?tab=&stockId= — list recent chats with first-user-message preview. */
+/** GET /api/chats?tab=&stockId=&includeGlobal= — list recent chats with first-user-message preview, scoped to current user. */
 export async function GET(req: NextRequest) {
+  const me = await getCurrentUser();
+  if (!me) return NextResponse.json({ error: 'unauthorized' }, { status: 401 });
+
   const url = new URL(req.url);
   const parsed = Query.safeParse({
     tab: url.searchParams.get('tab') ?? undefined,
     stockId: url.searchParams.get('stockId') ?? undefined,
+    includeGlobal: url.searchParams.get('includeGlobal') ?? undefined,
   });
   if (!parsed.success) return NextResponse.json({ error: 'bad query' }, { status: 400 });
 
-  const conds = [] as Array<ReturnType<typeof eq>>;
-  if (parsed.data.tab) conds.push(eq(chats.tab, parsed.data.tab));
-  if (parsed.data.stockId) conds.push(eq(chats.stockId, parsed.data.stockId));
+  const { tab, stockId, includeGlobal } = parsed.data;
+  const wantGlobal = includeGlobal === '1';
+
+  // Ownership predicate: stock joined through portfolios owned by current user.
+  // This sub-select returns 1 if the chat's stockId belongs to me.
+  const ownedByMe = sql`EXISTS (
+    SELECT 1 FROM ${stocks} s
+    JOIN ${portfolios} p ON p.id = s.portfolio_id
+    WHERE s.id = ${chats.stockId} AND p.user_id = ${me.id}
+  )`;
+
+  const conds: Array<ReturnType<typeof eq> | ReturnType<typeof sql>> = [];
+  if (tab) conds.push(eq(chats.tab, tab));
+
+  if (stockId) {
+    // Strict-only that stockId AND the stock must be owned by me.
+    conds.push(eq(chats.stockId, stockId));
+    conds.push(ownedByMe);
+  } else if (wantGlobal) {
+    // No stock filter: include user-owned-stock chats OR global (NULL) chats.
+    conds.push(or(ownedByMe, isNull(chats.stockId))!);
+  } else {
+    // Default: hide globals; only chats whose stock you own.
+    conds.push(ownedByMe);
+  }
 
   const rows = await db
     .select({
@@ -41,13 +74,14 @@ export async function GET(req: NextRequest) {
       )`,
     })
     .from(chats)
-    .where(conds.length ? and(...conds) : undefined)
+    .where(and(...conds))
     .orderBy(desc(chats.createdAt))
     .limit(100);
 
   return NextResponse.json(
     { chats: rows },
-    { headers: { 'Cache-Control': 'private, max-age=60, stale-while-revalidate=600' } },
+    // Short private TTL — no SWR — so a brand-new chat shows up on next nav.
+    { headers: { 'Cache-Control': 'private, max-age=10' } },
   );
 }
 
