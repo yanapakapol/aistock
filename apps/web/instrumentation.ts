@@ -1,11 +1,18 @@
 /**
- * Next.js calls `register()` once per server process. We skip in dev so the
- * scheduler chain (which transitively imports yahoo-finance2 + @primno/dpapi
- * + node-gyp-build) is never analyzed by the dev bundler.
+ * Next.js calls `register()` once per server process. We use this hook for
+ * two things:
  *
- * The `webpackIgnore` magic comment is essential: without it, Webpack
- * statically follows the import target and tries to bundle the scheduler
- * + its transitive native deps even though the call is gated at runtime.
+ *   1. Schema self-heal (always, on any Node runtime) — kicked off in the
+ *      background so the first request after a cold start is fast.
+ *   2. Booting the in-process scheduler — ONLY when the host is a
+ *      long-running Node process. On Vercel (serverless) the process dies
+ *      between requests so `croner` would never tick; routines there are
+ *      driven by Vercel Cron Jobs hitting `/api/cron/tick` instead.
+ *
+ * The `webpackIgnore` magic comment on the scheduler import is essential:
+ * without it, Webpack statically follows the import target and tries to
+ * bundle the scheduler + its transitive native deps even though the call
+ * is gated at runtime.
  */
 export async function register(): Promise<void> {
   if (process.env.NEXT_RUNTIME !== 'nodejs') return;
@@ -29,7 +36,24 @@ export async function register(): Promise<void> {
     /* boot path stays clean */
   }
 
-  if (process.env.NODE_ENV !== 'production') return;
+  // In-process cron only fires while a long-running Node process stays
+  // alive. On Vercel (and other serverless hosts) the function dies after
+  // each request, so `croner` never gets to tick — that's why production
+  // routines are driven by Vercel Cron Jobs hitting `/api/cron/tick`
+  // instead (see `apps/web/vercel.json`).
+  //
+  // The in-process scheduler is therefore only started when:
+  //   1. We're in local dev (`NODE_ENV !== 'production'`, before this
+  //      function early-returns above — note we already returned in that
+  //      branch in older versions; that gate is now removed so dev DOES
+  //      start it), OR
+  //   2. The host operator explicitly opts in with
+  //      `AISTOCK_INPROCESS_SCHEDULER=1` (self-hosted long-running Node
+  //      where Vercel Cron isn't available).
+  // On Vercel (production), neither holds and we skip startup entirely.
+  const isLocalDev = process.env.NODE_ENV !== 'production';
+  const isExplicitOptIn = process.env.AISTOCK_INPROCESS_SCHEDULER === '1';
+  if (!isLocalDev && !isExplicitOptIn) return;
   try {
     const mod = await import(/* webpackIgnore: true */ './lib/scheduler/index.js');
     await mod.getScheduler().start();

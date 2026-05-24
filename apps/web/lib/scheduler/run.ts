@@ -17,6 +17,9 @@ import { meter } from '../cost/meter';
 import { addSpend, checkBudgetOrThrow } from '../cost/ledger';
 import { scrubSecrets, sanitizeError } from '../security/scrub';
 
+import { CronExpressionParser } from 'cron-parser';
+import { cleanupExpiredGuestData } from '../auth/guest-cleanup';
+
 /**
  * A routine row loaded from the DB, narrowed to what runRoutineOnce needs.
  * Kept loose to avoid coupling to the full Drizzle row type.
@@ -309,6 +312,162 @@ export async function runRoutineOnce(routine: RoutineForRun): Promise<void> {
       .where(eq(routines.id, routine.id));
     throw err;
   }
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// Serverless tick entry points (used by /api/cron/tick on Vercel).
+// These functions are stateless and re-entrant: every invocation re-queries
+// the DB, so they are safe to call from a short-lived request handler that
+// dies seconds later.
+// ──────────────────────────────────────────────────────────────────────
+
+/**
+ * Shape returned by `runDueRoutines` so the cron tick endpoint can surface
+ * counts to logs / monitoring without exposing routine internals.
+ */
+export interface DueTickResult {
+  /** Number of routines that were due and executed during this tick. */
+  ranRoutines: number;
+  /** Routine ids that ran (handy when debugging from the response body). */
+  ranRoutineIds: number[];
+  /** Number of routines considered but skipped (not yet due / disabled mid-tick). */
+  skippedRoutines: number;
+  /** Guest accounts whose data was reset during this tick. */
+  cleanedGuests: number;
+  /** Total rows wiped during guest cleanup (chats, portfolios, keys, …). */
+  cleanedGuestRows: number;
+}
+
+/**
+ * Compute the next scheduled fire for a routine, given its cron + tz + last
+ * fire. We treat `lastRunAt` as the "base"; if it's null (never run) we use
+ * `now` so the very first tick after creation only fires when the cron's
+ * normal next time arrives — i.e. we do NOT backfill the moment a routine
+ * is created.
+ *
+ * Returns `null` if the cron expression is invalid (caller skips the routine).
+ */
+function nextFireAfter(
+  cronExpr: string,
+  tz: string,
+  base: Date,
+): Date | null {
+  try {
+    const iter = CronExpressionParser.parse(cronExpr, {
+      currentDate: base,
+      tz,
+    });
+    return iter.next().toDate();
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Per-tick entry point for serverless cron (Vercel Cron Jobs hitting
+ * `/api/cron/tick`). Loads every enabled routine, runs the ones whose next
+ * scheduled fire (from `lastRunAt` + `cronExpr` + `tz`) is at or before
+ * `now`, and also runs the cheap-idempotent guest-data cleanup sweep.
+ *
+ * Design notes:
+ *   - Each routine that's due is executed sequentially in chronological order
+ *     of its earliest due fire. This bounds tail latency of a single tick on
+ *     a free serverless function (default 10s / max 60s on Vercel Hobby).
+ *   - We only fire ONCE per routine per tick — if 3 fires were missed, the
+ *     scheduler ran them sequentially in the in-process implementation but
+ *     on serverless that risks blowing the function timeout. The next tick
+ *     5 minutes later will catch the next missed fire, and so on. For typical
+ *     daily / hourly routines this is indistinguishable from real-time.
+ *   - We swallow per-routine errors (logged) so a single bad routine cannot
+ *     poison the rest of the tick — `runRoutineOnce` already persists 'failed'
+ *     state on the run row.
+ *   - Guest cleanup runs every tick because the query is indexed by
+ *     `expires_at` and returns 0 rows in the common case. Cheap, idempotent.
+ */
+export async function runDueRoutines(
+  now: Date = new Date(),
+): Promise<DueTickResult> {
+  const enabled = await db
+    .select({
+      id: routines.id,
+      name: routines.name,
+      prompt: routines.prompt,
+      model: routines.model,
+      fallbackModels: routines.fallbackModels,
+      maxUsdPerRun: routines.maxUsdPerRun,
+      cronExpr: routines.cronExpr,
+      tz: routines.tz,
+      lastRunAt: routines.lastRunAt,
+    })
+    .from(routines)
+    .where(eq(routines.enabled, true));
+
+  // Bucket into "due now" vs "future". `lastRunAt` null means the routine
+  // has never fired; we still want it to fire if its cron's next-from-creation
+  // is now-or-past, so we base it on `routines.createdAt` would be ideal, but
+  // we don't carry that field here. Using `epoch 0` as the base would cause
+  // a brand-new "0 8 * * *" routine created at 09:00 to immediately fire
+  // (because 08:00 today is past). To avoid that surprise we treat null
+  // `lastRunAt` as "schedule from now" — the first real fire will be the
+  // next 08:00 after creation.
+  const due: typeof enabled = [];
+  for (const r of enabled) {
+    const base = r.lastRunAt ?? now;
+    const next = nextFireAfter(r.cronExpr, r.tz, base);
+    if (!next) continue; // invalid cron — skip silently
+    if (next <= now) due.push(r);
+  }
+
+  // Oldest-due first so a routine that's been waiting longer doesn't get
+  // starved by one created later.
+  due.sort((a, b) => {
+    const ax = (a.lastRunAt ?? new Date(0)).getTime();
+    const bx = (b.lastRunAt ?? new Date(0)).getTime();
+    return ax - bx;
+  });
+
+  const ranRoutineIds: number[] = [];
+  for (const r of due) {
+    try {
+      await runRoutineOnce({
+        id: r.id,
+        name: r.name,
+        prompt: r.prompt,
+        model: r.model,
+        fallbackModels: r.fallbackModels ?? [],
+        maxUsdPerRun: r.maxUsdPerRun,
+        tz: r.tz,
+      });
+      ranRoutineIds.push(r.id);
+    } catch (err) {
+      // runRoutineOnce already marked the run failed; just log here.
+      // eslint-disable-next-line no-console
+      console.error(`[cron-tick] routine ${r.id} threw:`, err);
+    }
+  }
+
+  // Guest cleanup: idempotent and cheap (indexed SELECT, 0 rows in steady
+  // state). Run every tick instead of gating on a 24h heuristic — the gate
+  // would require a `system_kv` round trip anyway, and module-level state
+  // does not persist between serverless invocations.
+  let cleanedGuests = 0;
+  let cleanedGuestRows = 0;
+  try {
+    const summary = await cleanupExpiredGuestData(now);
+    cleanedGuests = summary.usersReset;
+    cleanedGuestRows = summary.rowsDeleted;
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.error('[cron-tick] guest cleanup failed:', err);
+  }
+
+  return {
+    ranRoutines: ranRoutineIds.length,
+    ranRoutineIds,
+    skippedRoutines: enabled.length - ranRoutineIds.length,
+    cleanedGuests,
+    cleanedGuestRows,
+  };
 }
 
 async function failRun(

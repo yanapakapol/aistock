@@ -27,6 +27,18 @@ function logError(...args: unknown[]) {
  * One instance lives on `globalThis.__aistockScheduler` so Next.js HMR
  * (which re-evaluates modules but preserves the global) does not spawn
  * duplicate Cron jobs. Boot from `instrumentation.ts#register`.
+ *
+ * **Deployment caveat:** this whole class assumes a long-running Node
+ * process and is NOT used on Vercel (or any serverless host) because the
+ * process dies after each request, killing every armed `Cron`. On cloud
+ * deploys we instead use Vercel Cron Jobs hitting `/api/cron/tick`, which
+ * calls `runDueRoutines()` from `./run.ts`. The in-process scheduler stays
+ * around for local dev (`next dev`) and explicit-opt-in self-hosted
+ * deployments (`AISTOCK_INPROCESS_SCHEDULER=1`); see `instrumentation.ts`.
+ *
+ * `getScheduler().reload(id)` is still called from the routine CRUD routes
+ * even on Vercel — there it's a harmless no-op (the scheduler is never
+ * `start()`-ed in production), and on dev it re-arms the affected routine.
  */
 export class Scheduler {
   /** Arm of live cron jobs, keyed by routine id. */
@@ -257,6 +269,12 @@ declare global {
 /**
  * Get the process-wide singleton scheduler. Survives Next.js HMR because
  * `globalThis` is preserved across module re-evaluation.
+ *
+ * On serverless this still returns a usable instance, but `start()` is never
+ * called from `instrumentation.ts`, so the only effective surface is
+ * `reload()` (no-op without a started state — armed jobs simply never fire
+ * because the process exits). All actual work in production runs through
+ * `runDueRoutines()` triggered by Vercel Cron Jobs.
  */
 export function getScheduler(): Scheduler {
   if (!globalThis.__aistockScheduler) {
@@ -264,3 +282,7 @@ export function getScheduler(): Scheduler {
   }
   return globalThis.__aistockScheduler;
 }
+
+// Re-export the serverless tick entry point so callers can import the
+// scheduler surface from a single module (`@/lib/scheduler`).
+export { runDueRoutines, type DueTickResult } from './run';

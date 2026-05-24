@@ -31,6 +31,16 @@ export interface GuestCleanupSummary {
  *    must collect the user's stock ids and delete the chats explicitly
  *    BEFORE wiping portfolios, otherwise chats get orphaned with
  *    `stock_id = NULL` and stay forever.
+ *
+ * Invocation paths:
+ *  - In-process scheduler (`lib/scheduler/index.ts`) fires this at 03:00 UTC
+ *    daily — only relevant for local dev / self-hosted long-running Node.
+ *  - Vercel Cron Jobs (`/api/cron/tick`) call this every 5 minutes. That's
+ *    cheap because the WHERE clause (`role='guest' AND expires_at < now`)
+ *    hits an index and returns 0 rows in the common case; deletes only
+ *    happen when there's actually something to delete, so we don't bother
+ *    with a 24h gate.
+ *  - `/api/admin/cleanup-guests` (admin-triggered, manual).
  */
 export async function cleanupExpiredGuestData(now: Date = new Date()): Promise<GuestCleanupSummary> {
   // 1. Find expired guests.
