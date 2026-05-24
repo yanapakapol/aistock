@@ -24,5 +24,12 @@ export async function GET(
     .orderBy(desc(routineRuns.startedAt))
     .limit(20);
 
-  return NextResponse.json({ runs: rows });
+  // neon-http roundtrips Postgres numeric as a string. The client expects a
+  // number (calls .toFixed() etc.), so coerce each row.
+  const coerced = rows.map((r) => ({
+    ...r,
+    usdSpent: r.usdSpent == null ? null : Number(r.usdSpent),
+  }));
+
+  return NextResponse.json({ runs: coerced });
 }

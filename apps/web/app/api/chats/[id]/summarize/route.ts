@@ -1,12 +1,13 @@
 import { NextResponse, type NextRequest } from 'next/server';
-import { asc, desc, eq } from 'drizzle-orm';
+import { and, asc, desc, eq, sql } from 'drizzle-orm';
 import { generateText } from 'ai';
 import { db } from '@/lib/db/client';
-import { chats, chatMessages, chatSummaries } from '@/lib/db/schema';
+import { chats, chatMessages, chatSummaries, portfolios, stocks } from '@/lib/db/schema';
 import { clientFor } from '@/lib/llm/clientFor';
 import { loadApiKey } from '@/lib/llm/keys';
 import { PROVIDERS, type Provider } from '@/lib/llm/providers';
 import { scrubSecrets } from '@/lib/security/scrub';
+import { getCurrentUser } from '@/lib/auth/session';
 
 export const runtime = 'nodejs';
 export const maxDuration = 120;
@@ -19,15 +20,40 @@ export const maxDuration = 120;
  * Summaries live in chat_summaries (separate table). Raw history in
  * chat_messages is untouched, so the user can always re-load the full
  * conversation; the summary is an additional compact view.
+ *
+ * Ownership: we authorize via the chat → stock → portfolio → user chain,
+ * matching ../route.ts. Without this any signed-in user could read/write/
+ * delete summaries for any chat id.
  */
+async function assertChatOwnedByMe(id: number, userId: number) {
+  const ownedByMe = sql`EXISTS (
+    SELECT 1 FROM ${stocks} s
+    JOIN ${portfolios} p ON p.id = s.portfolio_id
+    WHERE s.id = ${chats.stockId} AND p.user_id = ${userId}
+  )`;
+  const [chat] = await db
+    .select()
+    .from(chats)
+    .where(and(eq(chats.id, id), ownedByMe))
+    .limit(1);
+  return chat ?? null;
+}
+
 export async function GET(
   _req: NextRequest,
   { params }: { params: Promise<{ id: string }> },
 ) {
+  const me = await getCurrentUser();
+  if (!me) return NextResponse.json({ error: 'unauthorized' }, { status: 401 });
+
   const id = Number((await params).id);
   if (!Number.isFinite(id) || id <= 0) {
     return NextResponse.json({ error: 'bad id' }, { status: 400 });
   }
+  const chat = await assertChatOwnedByMe(id, me.id);
+  // 404 (not 403) to avoid leaking existence of someone else's chat.
+  if (!chat) return NextResponse.json({ error: 'not found' }, { status: 404 });
+
   const [s] = await db
     .select()
     .from(chatSummaries)
@@ -44,6 +70,9 @@ export async function POST(
   if (req.headers.get('sec-fetch-site') && req.headers.get('sec-fetch-site') !== 'same-origin') {
     return NextResponse.json({ error: 'cross-origin denied' }, { status: 403 });
   }
+  const me = await getCurrentUser().catch(() => null);
+  if (!me) return NextResponse.json({ error: 'unauthorized' }, { status: 401 });
+
   const id = Number((await params).id);
   if (!Number.isFinite(id) || id <= 0) {
     return NextResponse.json({ error: 'bad id' }, { status: 400 });
@@ -56,8 +85,8 @@ export async function POST(
 
   // Pick a provider/model. Caller may override; otherwise use the chat's own
   // recorded model + the first provider with a saved key.
-  const [chatRow] = await db.select().from(chats).where(eq(chats.id, id)).limit(1);
-  if (!chatRow) return NextResponse.json({ error: 'chat not found' }, { status: 404 });
+  const chatRow = await assertChatOwnedByMe(id, me.id);
+  if (!chatRow) return NextResponse.json({ error: 'not found' }, { status: 404 });
 
   const rows = await db
     .select({ role: chatMessages.role, contentMd: chatMessages.contentMd })
@@ -139,10 +168,16 @@ export async function DELETE(
   if (req.headers.get('sec-fetch-site') && req.headers.get('sec-fetch-site') !== 'same-origin') {
     return NextResponse.json({ error: 'cross-origin denied' }, { status: 403 });
   }
+  const me = await getCurrentUser().catch(() => null);
+  if (!me) return NextResponse.json({ error: 'unauthorized' }, { status: 401 });
+
   const id = Number((await params).id);
   if (!Number.isFinite(id) || id <= 0) {
     return NextResponse.json({ error: 'bad id' }, { status: 400 });
   }
+  const chat = await assertChatOwnedByMe(id, me.id);
+  if (!chat) return NextResponse.json({ error: 'not found' }, { status: 404 });
+
   await db.delete(chatSummaries).where(eq(chatSummaries.chatId, id));
   return NextResponse.json({ ok: true });
 }

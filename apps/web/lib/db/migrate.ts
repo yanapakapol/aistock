@@ -148,6 +148,15 @@ async function main() {
   await sql`CREATE UNIQUE INDEX IF NOT EXISTS stocks_portfolio_symbol_exchange_uq
             ON stocks (portfolio_id, symbol, exchange)`;
 
+  // ---- Per-user ownership on routines (multi-tenant) ----
+  // Nullable so pre-existing rows survive — the route layer treats NULL
+  // user_id as "orphan, do not list to anyone". Every NEW insert MUST set
+  // user_id (see app/api/routines/route.ts + lib/mcp/tools/createRoutine.ts).
+  // The Vercel-Cron-driven runDueRoutines path is privileged and ignores
+  // user_id by design (the cron is the system, not a user).
+  await sql`ALTER TABLE routines ADD COLUMN IF NOT EXISTS user_id integer REFERENCES users(id) ON DELETE CASCADE`;
+  await sql`CREATE INDEX IF NOT EXISTS routines_user_idx ON routines(user_id)`;
+
   await sql.end();
   // eslint-disable-next-line no-console
   console.log('migrated');

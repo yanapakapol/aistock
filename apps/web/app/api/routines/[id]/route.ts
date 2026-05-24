@@ -104,7 +104,15 @@ export async function PATCH(
     // non-fatal
   }
 
-  return NextResponse.json({ routine: updated });
+  // neon-http roundtrips Postgres numeric as a string; coerce so the client
+  // can call .toFixed() etc. without crashing.
+  const coerced = {
+    ...updated,
+    maxUsdPerRun:
+      updated.maxUsdPerRun == null ? null : Number(updated.maxUsdPerRun),
+  };
+
+  return NextResponse.json({ routine: coerced });
 }
 
 export async function DELETE(

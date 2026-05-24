@@ -547,6 +547,21 @@ async function runBumps(): Promise<void> {
     'CREATE stocks_portfolio_symbol_exchange_uq',
     'CREATE UNIQUE INDEX IF NOT EXISTS stocks_portfolio_symbol_exchange_uq ON stocks (portfolio_id, symbol, exchange)',
   );
+
+  // Per-user ownership on routines (multi-tenant). Nullable so existing rows
+  // created before this fix survive — the route layer treats NULL user_id as
+  // "orphan, do not list to anyone". Every NEW insert MUST set user_id; see
+  // app/api/routines/route.ts and lib/mcp/tools/createRoutine.ts. The
+  // Vercel-Cron-driven runDueRoutines path is privileged and ignores user_id
+  // by design (the cron is the system, not a user).
+  await tryStmt(
+    'ADD routines.user_id',
+    'ALTER TABLE routines ADD COLUMN IF NOT EXISTS user_id integer REFERENCES users(id) ON DELETE CASCADE',
+  );
+  await tryStmt(
+    'CREATE routines_user_idx',
+    'CREATE INDEX IF NOT EXISTS routines_user_idx ON routines(user_id)',
+  );
 }
 
 /**

@@ -1,9 +1,10 @@
 import { NextResponse, type NextRequest } from 'next/server';
 import { z } from 'zod';
-import { desc } from 'drizzle-orm';
+import { desc, eq } from 'drizzle-orm';
 import { CronExpressionParser } from 'cron-parser';
 import { db } from '@/lib/db/client';
 import { routines } from '@/lib/db/schema';
+import { getCurrentUser } from '@/lib/auth/session';
 import { getScheduler } from '@/lib/scheduler';
 
 export const runtime = 'nodejs';
@@ -37,9 +38,28 @@ function validateCron(expr: string, tz: string): string | null {
   }
 }
 
+// neon-http roundtrips Postgres numeric as a string. The client expects a
+// number (calls .toFixed() etc.), so coerce here. `maxUsdPerRun` is NOT NULL
+// in the schema, but tolerate null defensively in case that ever changes.
+function coerceRoutine<T extends { maxUsdPerRun: string | number | null }>(r: T) {
+  return {
+    ...r,
+    maxUsdPerRun: r.maxUsdPerRun == null ? null : Number(r.maxUsdPerRun),
+  };
+}
+
 export async function GET() {
-  const rows = await db.select().from(routines).orderBy(desc(routines.createdAt));
-  return NextResponse.json({ routines: rows });
+  // Authenticated, per-user list. Rows with NULL user_id (created before the
+  // ownership column landed) are orphans and intentionally invisible here.
+  const me = await getCurrentUser();
+  if (!me) return NextResponse.json({ error: 'unauthorized' }, { status: 401 });
+
+  const rows = await db
+    .select()
+    .from(routines)
+    .where(eq(routines.userId, me.id))
+    .orderBy(desc(routines.createdAt));
+  return NextResponse.json({ routines: rows.map(coerceRoutine) });
 }
 
 export async function POST(req: NextRequest) {
@@ -48,6 +68,9 @@ export async function POST(req: NextRequest) {
   } catch (r) {
     return r as Response;
   }
+
+  const me = await getCurrentUser();
+  if (!me) return NextResponse.json({ error: 'unauthorized' }, { status: 401 });
 
   const json = await req.json().catch(() => null);
   const parsed = CreateBody.safeParse(json);
@@ -68,6 +91,7 @@ export async function POST(req: NextRequest) {
     const [inserted] = await db
       .insert(routines)
       .values({
+        userId: me.id,
         name: data.name,
         prompt: data.prompt,
         tab: data.tab,
@@ -89,7 +113,7 @@ export async function POST(req: NextRequest) {
       // path will pick the routine up on next boot.
     }
 
-    return NextResponse.json({ routine: inserted }, { status: 201 });
+    return NextResponse.json({ routine: coerceRoutine(inserted) }, { status: 201 });
   } catch (err) {
     return NextResponse.json(
       { error: 'insert failed', detail: (err as Error).message },

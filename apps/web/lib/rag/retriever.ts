@@ -1,3 +1,26 @@
+// ============================================================================
+// NOTE: Sparse BM25 retrieval (ParadeDB `@@@` operator + `paradedb.score()`)
+// is DISABLED in this build. Those operators require the `pg_search`
+// extension, which is NOT available on Neon (our production Postgres).
+// Calling them on Neon raises a 5xx ("operator does not exist: text @@@ text"
+// / "schema paradedb does not exist") on every hybrid-search request.
+//
+// As a result `hybridSearch()` now uses dense (pgvector cosine) retrieval
+// only. The public API (`HybridSearchOpts`, `HybridHit`, `hybridSearch`) is
+// unchanged — callers receive the same shape, just sourced solely from the
+// dense path. RRF merge logic is preserved so re-enabling sparse later only
+// requires repopulating the sparse lists.
+//
+// To re-enable BM25 sparse retrieval:
+//   1. Run on ParadeDB (or a self-hosted Postgres + pg_search build) and
+//      `CREATE EXTENSION pg_search;` plus the relevant BM25 indexes on
+//      `news_chunks.chunk_text`, `research_notes.chunk_text`, and
+//      `business_context_chunks.chunk_text`.
+//   2. Restore the `sparseNews` / `sparseResearch` / `sparseBusiness`
+//      implementations (see git history of this file) and re-add them to the
+//      `sparse` array in `hybridSearch`.
+// ============================================================================
+
 import 'server-only';
 import { sql } from 'drizzle-orm';
 import { db } from '@/lib/db/client';
@@ -8,6 +31,13 @@ import {
   pickEmbeddingProvider,
   type EmbeddingColumn,
 } from './embeddings';
+
+// Emit a single, module-load-time warning so operators see why hybrid search
+// is dense-only without having to grep the source.
+// eslint-disable-next-line no-console
+console.warn(
+  '[rag/retriever] BM25 sparse retrieval is DISABLED (pg_search extension not installed on Neon); using dense pgvector path only.',
+);
 
 export interface HybridSearchOpts {
   stockId: number;
@@ -72,18 +102,20 @@ async function resolveColumn(
  *    collection is pinned to (via any pre-existing row's `embedding_model`).
  *    Different stocks may live in different columns — that's fine, the
  *    per-stock filter scopes each query.
- * 3. Per table, run two top-50 lookups in parallel:
- *      a. Dense: `<col> <=> $q` (cosine distance, ascending), filtering out
- *         rows where that column is NULL (rows written under a different
- *         model never share a column with the query vector).
- *      b. Sparse: `chunk_text @@@ $query` (ParadeDB BM25, descending score).
- * 4. Merge all six result lists via Reciprocal Rank Fusion (k=60) and return
- *    the top `k` (default 10).
+ * 3. Per table, run the dense top-50 lookup in parallel:
+ *      Dense: `<col> <=> $q` (cosine distance, ascending), filtering out
+ *      rows where that column is NULL (rows written under a different
+ *      model never share a column with the query vector).
+ *    The sparse BM25 path is currently disabled — see the file header.
+ * 4. Merge the dense result lists via Reciprocal Rank Fusion (k=60) and
+ *    return the top `k` (default 10). The sparse lists are passed in as
+ *    empty arrays so the RRF merge logic stays unchanged.
  *
  * Notes:
  *  - If the query vector's dim doesn't match the stock's pinned column,
- *    we skip the dense lookup for that table — sparse BM25 still returns.
- *    This keeps cross-provider rotation graceful instead of throwing.
+ *    we skip the dense lookup for that table. With sparse disabled, that
+ *    table will contribute no hits for this query — re-embed the corpus
+ *    with the active provider to bring it back.
  */
 export async function hybridSearch(opts: HybridSearchOpts): Promise<HybridHit[]> {
   const k = opts.k ?? 10;
@@ -116,10 +148,14 @@ export async function hybridSearch(opts: HybridSearchOpts): Promise<HybridHit[]>
       ? denseBusiness(opts.stockId, qvecLiteral, businessCol)
       : Promise.resolve([]),
   ];
+  // Sparse BM25 path disabled (see file header) — pass empty lists so the
+  // RRF merge below behaves identically to the dense-only case without
+  // requiring branching downstream.
+  void queryText; // retained for future re-enable + to keep the signature stable
   const sparse: Array<Promise<RawCandidate[]>> = [
-    sparseNews(opts.stockId, queryText, fromTs, toTs),
-    sparseResearch(opts.stockId, queryText),
-    sparseBusiness(opts.stockId, queryText),
+    Promise.resolve([]),
+    Promise.resolve([]),
+    Promise.resolve([]),
   ];
 
   const settled = await Promise.all([...dense, ...sparse]);
@@ -187,57 +223,11 @@ async function denseBusiness(
   return castRows(rows, 'business_context', true);
 }
 
-// ---------- Sparse lookups (ParadeDB BM25 via @@@) ----------
-
-async function sparseNews(
-  stockId: number,
-  q: string,
-  fromTs: Date | null,
-  toTs: Date | null,
-): Promise<RawCandidate[]> {
-  const dateFilter = sql`${
-    fromTs ? sql`and published_at >= ${fromTs}` : sql``
-  } ${toTs ? sql`and published_at <= ${toTs}` : sql``}`;
-  const rows = await db.execute(sql`
-    select id, chunk_text as text, source_url, published_at,
-           paradedb.score(id) as bm25
-      from news_chunks
-     where stock_id = ${stockId}
-       and chunk_text @@@ ${q}
-       ${dateFilter}
-     order by paradedb.score(id) desc
-     limit ${PER_TABLE_LIMIT}
-  `);
-  return castRows(rows, 'news', false);
-}
-
-async function sparseResearch(stockId: number, q: string): Promise<RawCandidate[]> {
-  const rows = await db.execute(sql`
-    select id, chunk_text as text, null::text as source_url,
-           null::timestamptz as published_at,
-           paradedb.score(id) as bm25
-      from research_notes
-     where stock_id = ${stockId}
-       and chunk_text @@@ ${q}
-     order by paradedb.score(id) desc
-     limit ${PER_TABLE_LIMIT}
-  `);
-  return castRows(rows, 'research', false);
-}
-
-async function sparseBusiness(stockId: number, q: string): Promise<RawCandidate[]> {
-  const rows = await db.execute(sql`
-    select id, chunk_text as text, null::text as source_url,
-           null::timestamptz as published_at,
-           paradedb.score(id) as bm25
-      from business_context_chunks
-     where stock_id = ${stockId}
-       and chunk_text @@@ ${q}
-     order by paradedb.score(id) desc
-     limit ${PER_TABLE_LIMIT}
-  `);
-  return castRows(rows, 'business_context', false);
-}
+// ---------- Sparse lookups (ParadeDB BM25 via @@@) — DISABLED ----------
+// The sparseNews / sparseResearch / sparseBusiness helpers were removed
+// because Neon does not provide the `pg_search` extension. See the file
+// header for re-enable instructions and the git history for the prior
+// implementations.
 
 // ---------- Helpers ----------
 

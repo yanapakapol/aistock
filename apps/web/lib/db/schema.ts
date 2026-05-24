@@ -293,14 +293,26 @@ export const researchTasks = pgTable(
 
 // ---------- Chats ----------
 
-export const chats = pgTable('chats', {
-  id: serial('id').primaryKey(),
-  tab: tabEnum('tab').notNull(),
-  stockId: integer('stock_id').references(() => stocks.id, { onDelete: 'set null' }),
-  model: text('model').notNull(),
-  sessionId: text('session_id'),
-  createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
-});
+export const chats = pgTable(
+  'chats',
+  {
+    id: serial('id').primaryKey(),
+    tab: tabEnum('tab').notNull(),
+    stockId: integer('stock_id').references(() => stocks.id, { onDelete: 'set null' }),
+    // True per-user link. stock_id remains nullable (and was the only ownership
+    // hook for a long time) — but a chat survives stock deletion (ON DELETE SET
+    // NULL), so without user_id those orphans become unowned forever. user_id
+    // is added via ensure-schema.ts ALTER for backward-compat; new chats always
+    // write it from the POST handler / createChat helper.
+    userId: integer('user_id').references(() => users.id, { onDelete: 'cascade' }),
+    model: text('model').notNull(),
+    sessionId: text('session_id'),
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => ({
+    byUser: index('chats_user_idx').on(t.userId, t.createdAt),
+  }),
+);
 
 export const chatMessages = pgTable(
   'chat_messages',
@@ -348,21 +360,34 @@ export const chatSummaries = pgTable(
 
 // ---------- Routines ----------
 
-export const routines = pgTable('routines', {
-  id: serial('id').primaryKey(),
-  name: text('name').notNull(),
-  prompt: text('prompt').notNull(),
-  tab: tabEnum('tab').notNull(),
-  model: text('model').notNull(),
-  fallbackModels: jsonb('fallback_models').$type<string[]>().default([]).notNull(),
-  cronExpr: text('cron_expr').notNull(),
-  tz: text('tz').notNull().default('Asia/Bangkok'),
-  lastRunAt: timestamp('last_run_at', { withTimezone: true }),
-  lastRunStatus: routineStatusEnum('last_run_status'),
-  enabled: boolean('enabled').notNull().default(true),
-  maxUsdPerRun: numeric('max_usd_per_run', { precision: 8, scale: 4 }).notNull().default('1.00'),
-  createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
-});
+export const routines = pgTable(
+  'routines',
+  {
+    id: serial('id').primaryKey(),
+    // Owner. Nullable for backfill safety on pre-existing rows created before
+    // the multi-tenant fix landed (those rows are treated as orphans by the
+    // routes — listed by no one, mutated by no one). Every NEW insert MUST
+    // populate this; see app/api/routines/route.ts and lib/mcp/tools/createRoutine.ts.
+    // The Vercel-Cron-driven runDueRoutines path is privileged and ignores
+    // user_id deliberately — it iterates ALL enabled routines as the system.
+    userId: integer('user_id').references(() => users.id, { onDelete: 'cascade' }),
+    name: text('name').notNull(),
+    prompt: text('prompt').notNull(),
+    tab: tabEnum('tab').notNull(),
+    model: text('model').notNull(),
+    fallbackModels: jsonb('fallback_models').$type<string[]>().default([]).notNull(),
+    cronExpr: text('cron_expr').notNull(),
+    tz: text('tz').notNull().default('Asia/Bangkok'),
+    lastRunAt: timestamp('last_run_at', { withTimezone: true }),
+    lastRunStatus: routineStatusEnum('last_run_status'),
+    enabled: boolean('enabled').notNull().default(true),
+    maxUsdPerRun: numeric('max_usd_per_run', { precision: 8, scale: 4 }).notNull().default('1.00'),
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => ({
+    byUser: index('routines_user_idx').on(t.userId),
+  }),
+);
 
 export const routineRuns = pgTable(
   'routine_runs',
@@ -528,18 +553,29 @@ export const businessContextChunks = pgTable(
 
 // ---------- Web Push subscriptions ----------
 
-export const pushSubscriptions = pgTable('push_subscriptions', {
-  id: serial('id').primaryKey(),
-  endpoint: text('endpoint').notNull().unique(),
-  p256dh: text('p256dh').notNull(),
-  auth: text('auth').notNull(),
-  userAgent: text('user_agent'),
-  createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
-  lastSentAt: timestamp('last_sent_at', { withTimezone: true }),
-  // Set when web-push returns 410 Gone (subscription revoked); soft-disabled rows
-  // are kept for audit but skipped by the sender.
-  disabledAt: timestamp('disabled_at', { withTimezone: true }),
-});
+export const pushSubscriptions = pgTable(
+  'push_subscriptions',
+  {
+    id: serial('id').primaryKey(),
+    // Per-user ownership: previously global, which meant any subscriber received
+    // every routine's "done" notification. Added via ensure-schema.ts ALTER for
+    // backward-compat (existing rows get NULL and just receive nothing until the
+    // browser re-subscribes); new POSTs always write user_id from the session.
+    userId: integer('user_id').references(() => users.id, { onDelete: 'cascade' }),
+    endpoint: text('endpoint').notNull().unique(),
+    p256dh: text('p256dh').notNull(),
+    auth: text('auth').notNull(),
+    userAgent: text('user_agent'),
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+    lastSentAt: timestamp('last_sent_at', { withTimezone: true }),
+    // Set when web-push returns 410 Gone (subscription revoked); soft-disabled rows
+    // are kept for audit but skipped by the sender.
+    disabledAt: timestamp('disabled_at', { withTimezone: true }),
+  },
+  (t) => ({
+    byUser: index('push_subscriptions_user_idx').on(t.userId),
+  }),
+);
 
 // ---------- Provider constants (shared by other modules) ----------
 //
