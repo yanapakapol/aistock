@@ -3,8 +3,8 @@ import { z } from 'zod';
 import { streamText, generateText, convertToModelMessages, type ModelMessage } from 'ai';
 
 import { db } from '@/lib/db/client';
-import { chats, chatMessages, outboundAudit, stocks, users, type messageRoleEnum } from '@/lib/db/schema';
-import { eq } from 'drizzle-orm';
+import { chats, chatMessages, outboundAudit, portfolios, stocks, users, type messageRoleEnum } from '@/lib/db/schema';
+import { and, eq } from 'drizzle-orm';
 
 import { PROVIDERS, LLM_HOSTS, type Provider } from '@/lib/llm/providers';
 import { loadApiKey } from '@/lib/llm/keys';
@@ -302,7 +302,11 @@ export async function POST(req: NextRequest) {
     tab === 'research' && !dbMode
       ? TOOLS.filter((t) => RESEARCH_TOOL_ALLOW.has(t.name))
       : TOOLS;
-  const tools = Object.fromEntries(toolsList.map((t) => [t.name, toAiSdkTool(t)]));
+  // Pass the authenticated user's id into every tool's ctx. Stock-scoped
+  // tools use this to refuse access to data outside the caller's portfolio.
+  const tools = Object.fromEntries(
+    toolsList.map((t) => [t.name, toAiSdkTool(t, { userId: sessionUser.id })]),
+  );
 
   // Build a small system preamble so the model already knows the active stock
   // (avoids it calling search_stocks for a stock that's already in the DB),
@@ -310,10 +314,15 @@ export async function POST(req: NextRequest) {
   let stockCtx = '';
   if (stockId) {
     try {
+      // Ownership-scoped: only build stockCtx if the stock belongs to this
+      // user. Without the portfolios JOIN, a malicious client could pass
+      // another user's stockId in the request body and the model would
+      // happily run all its tools against that stock_id.
       const [s] = await db
         .select({ id: stocks.id, symbol: stocks.symbol, exchange: stocks.exchange, name: stocks.name })
         .from(stocks)
-        .where(eq(stocks.id, stockId))
+        .innerJoin(portfolios, eq(portfolios.id, stocks.portfolioId))
+        .where(and(eq(stocks.id, stockId), eq(portfolios.userId, sessionUser.id)))
         .limit(1);
       if (s) {
         stockCtx =

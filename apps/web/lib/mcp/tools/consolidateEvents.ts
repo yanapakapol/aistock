@@ -3,6 +3,7 @@ import { and, eq, sql } from 'drizzle-orm';
 import { db } from '@/lib/db/client';
 import { events } from '@/lib/db/schema';
 import type { ToolHandler } from '../types';
+import { assertOwnsStock } from '../ownership';
 
 const input = z.object({
   stock_id: z.number().int().positive(),
@@ -76,7 +77,8 @@ export const consolidateEvents: ToolHandler<Input, Output> = {
     'Call this at the END of every research session to keep the DB clean.',
   input,
   output,
-  async execute({ stock_id, dry_run, similarity: simThreshold }) {
+  async execute({ stock_id, dry_run, similarity: simThreshold }, ctx) {
+    await assertOwnsStock(stock_id, ctx);
     const rows = (await db
       .select({
         id: events.id,

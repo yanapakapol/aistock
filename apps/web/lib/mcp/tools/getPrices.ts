@@ -3,6 +3,7 @@ import { and, between, eq, asc } from 'drizzle-orm';
 import { db } from '@/lib/db/client';
 import { pricesDaily } from '@/lib/db/schema';
 import type { ToolHandler } from '../types';
+import { assertOwnsStock } from '../ownership';
 
 const input = z.object({
   stock_id: z.number().int().positive(),
@@ -33,7 +34,8 @@ export const getPrices: ToolHandler<Input, Output> = {
     'Daily OHLCV rows for a stock between `from` and `to` (inclusive). Use this for day-level price queries; ranges are bounded by what the ingestion job has already loaded into prices_daily.',
   input,
   output,
-  async execute({ stock_id, from, to }) {
+  async execute({ stock_id, from, to }, ctx) {
+    await assertOwnsStock(stock_id, ctx);
     const rows = await db
       .select()
       .from(pricesDaily)

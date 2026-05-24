@@ -74,7 +74,11 @@ export async function GET(
   return NextResponse.json({ chat, messages: rows });
 }
 
-/** DELETE /api/chats/:id — cascade-deletes its messages via FK. */
+/**
+ * DELETE /api/chats/:id — cascade-deletes its messages via FK. Ownership-
+ * scoped: only deletes if the chat belongs to one of the caller's stocks.
+ * Previously this would happily delete any chat by id with no check at all.
+ */
 export async function DELETE(
   req: NextRequest,
   { params }: { params: Promise<{ id: string }> },
@@ -82,11 +86,25 @@ export async function DELETE(
   if (req.headers.get('sec-fetch-site') && req.headers.get('sec-fetch-site') !== 'same-origin') {
     return NextResponse.json({ error: 'cross-origin denied' }, { status: 403 });
   }
+  const me = await getCurrentUser().catch(() => null);
+  if (!me) return NextResponse.json({ error: 'unauthorized' }, { status: 401 });
+
   const { id: raw } = await params;
   const id = Number(raw);
   if (!Number.isFinite(id) || id <= 0) {
     return NextResponse.json({ error: 'bad id' }, { status: 400 });
   }
-  await db.delete(chats).where(eq(chats.id, id));
+  const ownedByMe = sql`EXISTS (
+    SELECT 1 FROM ${stocks} s
+    JOIN ${portfolios} p ON p.id = s.portfolio_id
+    WHERE s.id = ${chats.stockId} AND p.user_id = ${me.id}
+  )`;
+  const result = await db
+    .delete(chats)
+    .where(and(eq(chats.id, id), ownedByMe))
+    .returning({ id: chats.id });
+  if (result.length === 0) {
+    return NextResponse.json({ error: 'not found' }, { status: 404 });
+  }
   return NextResponse.json({ ok: true });
 }

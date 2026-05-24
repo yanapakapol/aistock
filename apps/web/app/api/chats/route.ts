@@ -87,16 +87,38 @@ export async function GET(req: NextRequest) {
 
 const DeleteBody = z.object({ ids: z.array(z.number().int().positive()).min(1) });
 
-/** DELETE /api/chats body {ids:[...]} — cascade deletes via FK. */
+/**
+ * DELETE /api/chats body {ids:[...]} — cascade deletes via FK. Ownership-
+ * scoped: only deletes chats whose stockId belongs to one of the caller's
+ * portfolios. Without this check, any signed-in user could nuke any chat
+ * by guessing its id.
+ */
 export async function DELETE(req: NextRequest) {
   if (req.headers.get('sec-fetch-site') && req.headers.get('sec-fetch-site') !== 'same-origin') {
     return NextResponse.json({ error: 'cross-origin denied' }, { status: 403 });
   }
+  const me = await getCurrentUser().catch(() => null);
+  if (!me) return NextResponse.json({ error: 'unauthorized' }, { status: 401 });
+
   const parsed = DeleteBody.safeParse(await req.json().catch(() => null));
   if (!parsed.success) return NextResponse.json({ error: 'bad body' }, { status: 400 });
   const ids = parsed.data.ids;
-  await db.delete(chats).where(sql`id = ANY(${ids})`);
-  return NextResponse.json({ ok: true, deleted: ids.length });
+
+  // Filter down to chats the caller actually owns (via stock→portfolio→user).
+  // Chats with stockId IS NULL are not owned by anyone in particular today —
+  // we skip those entirely from delete-by-id (use the purge endpoint instead).
+  const owned = await db
+    .select({ id: chats.id })
+    .from(chats)
+    .innerJoin(stocks, eq(stocks.id, chats.stockId))
+    .innerJoin(portfolios, eq(portfolios.id, stocks.portfolioId))
+    .where(and(sql`${chats.id} = ANY(${ids})`, eq(portfolios.userId, me.id)));
+  const ownedIds = owned.map((r) => r.id);
+  if (ownedIds.length === 0) {
+    return NextResponse.json({ ok: true, deleted: 0 });
+  }
+  await db.delete(chats).where(sql`id = ANY(${ownedIds})`);
+  return NextResponse.json({ ok: true, deleted: ownedIds.length });
 }
 
 const PurgeBody = z.object({
@@ -114,6 +136,9 @@ export async function POST(req: NextRequest) {
   if (req.headers.get('sec-fetch-site') && req.headers.get('sec-fetch-site') !== 'same-origin') {
     return NextResponse.json({ error: 'cross-origin denied' }, { status: 403 });
   }
+  const me = await getCurrentUser().catch(() => null);
+  if (!me) return NextResponse.json({ error: 'unauthorized' }, { status: 401 });
+
   const parsed = PurgeBody.safeParse(await req.json().catch(() => ({})));
   if (!parsed.success) return NextResponse.json({ error: 'bad body' }, { status: 400 });
 
@@ -137,15 +162,21 @@ export async function POST(req: NextRequest) {
 
   let scope = ids.map((r) => r.id);
 
-  // Optional scope narrowing by tab/stockId.
-  if ((parsed.data.tab || parsed.data.stockId) && scope.length) {
-    const conds = [] as Array<ReturnType<typeof eq>>;
+  // Always narrow to chats owned by the caller (via stock→portfolio→user).
+  // Optional tab/stockId narrowing applies on top.
+  if (scope.length) {
+    const conds: Array<ReturnType<typeof eq> | ReturnType<typeof sql>> = [
+      sql`${chats.id} = ANY(${scope})`,
+      eq(portfolios.userId, me.id),
+    ];
     if (parsed.data.tab) conds.push(eq(chats.tab, parsed.data.tab));
     if (parsed.data.stockId) conds.push(eq(chats.stockId, parsed.data.stockId));
     const ok = await db
       .select({ id: chats.id })
       .from(chats)
-      .where(and(...conds, sql`id = ANY(${scope})`));
+      .innerJoin(stocks, eq(stocks.id, chats.stockId))
+      .innerJoin(portfolios, eq(portfolios.id, stocks.portfolioId))
+      .where(and(...conds));
     scope = ok.map((r) => r.id);
   }
 

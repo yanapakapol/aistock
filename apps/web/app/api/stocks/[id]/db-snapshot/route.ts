@@ -19,6 +19,8 @@ import {
   businessContextChunks,
   stocks,
 } from '@/lib/db/schema';
+import { getCurrentUser } from '@/lib/auth/session';
+import { getStockById } from '@/lib/portfolio/queries';
 
 export const runtime = 'nodejs';
 
@@ -43,13 +45,22 @@ export async function GET(
   // date_precision, sentiment_score, probability_negative, created_at, etc.).
   // Default omits those — they aren't rendered by db-snapshot-panel or any
   // tool renderer, and dropping them ~halves the payload on chatty stocks.
+  const me = await getCurrentUser().catch(() => null);
+  if (!me) return NextResponse.json({ error: 'unauthorized' }, { status: 401 });
+
   const wantsFull = req.nextUrl.searchParams.get('fields') === 'full';
   const id = Number((await params).id);
   if (!Number.isFinite(id) || id <= 0) {
     return NextResponse.json({ error: 'bad id' }, { status: 400 });
   }
-  const [stock] = await db.select().from(stocks).where(eq(stocks.id, id)).limit(1);
+  // Ownership-scoped: refuse if the stock isn't in the caller's portfolios.
+  // Returns 404 (not 403) on purpose — don't disclose whether the id exists
+  // in another user's portfolio.
+  const stock = await getStockById(id, me.id);
   if (!stock) return NextResponse.json({ error: 'not found' }, { status: 404 });
+  // Silence the unused-import lint for the legacy `stocks` table reference
+  // (we used to read it directly; ownership check goes through the helper).
+  void stocks;
 
   const [eventsRows, futureRows, ctxRow, tasksRows, priceAgg, newsCount, notesCount, ctxChunksCount] =
     await Promise.all([

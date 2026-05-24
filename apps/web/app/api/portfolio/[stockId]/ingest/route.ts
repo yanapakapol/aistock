@@ -2,6 +2,7 @@ import { NextResponse, type NextRequest } from 'next/server';
 import { z } from 'zod';
 import { ingestDailyForStock } from '@/lib/market/ingest';
 import { getStockById } from '@/lib/portfolio/queries';
+import { getCurrentUser } from '@/lib/auth/session';
 
 export const runtime = 'nodejs';
 
@@ -23,6 +24,8 @@ export async function POST(
   } catch (r) {
     return r as Response;
   }
+  const me = await getCurrentUser().catch(() => null);
+  if (!me) return NextResponse.json({ error: 'unauthorized' }, { status: 401 });
 
   const { stockId: stockIdRaw } = await params;
   const parsed = StockIdSchema.safeParse(stockIdRaw);
@@ -31,7 +34,8 @@ export async function POST(
   }
   const stockId = parsed.data;
 
-  const stock = await getStockById(stockId);
+  // Ownership-scoped — refuse if the stock isn't in the caller's portfolios.
+  const stock = await getStockById(stockId, me.id);
   if (!stock) {
     return NextResponse.json({ error: 'stock not found' }, { status: 404 });
   }

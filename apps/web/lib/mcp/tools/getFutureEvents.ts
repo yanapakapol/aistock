@@ -3,6 +3,7 @@ import { asc, eq } from 'drizzle-orm';
 import { db } from '@/lib/db/client';
 import { futureEvents } from '@/lib/db/schema';
 import type { ToolHandler } from '../types';
+import { assertOwnsStock } from '../ownership';
 
 const input = z.object({ stock_id: z.number().int().positive() });
 type Input = z.infer<typeof input>;
@@ -28,7 +29,8 @@ export const getFutureEvents: ToolHandler<Input, Output> = {
     'Forward-looking events on the calendar for a stock (earnings, expected announcements, regulatory dates) ordered by expected_date ascending.',
   input,
   output,
-  async execute({ stock_id }) {
+  async execute({ stock_id }, ctx) {
+    await assertOwnsStock(stock_id, ctx);
     const rows = await db
       .select()
       .from(futureEvents)

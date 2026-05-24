@@ -3,6 +3,7 @@ import { eq } from 'drizzle-orm';
 import { db } from '@/lib/db/client';
 import { businessContext } from '@/lib/db/schema';
 import type { ToolHandler } from '../types';
+import { assertOwnsStock } from '../ownership';
 
 const input = z.object({
   stock_id: z.number().int().positive(),
@@ -37,7 +38,8 @@ export const upsertBusinessContext: ToolHandler<Input, Output> = {
     'Appends a markdown patch to a stock\'s business_context row (summary/timeline/future_outlook). Creates the row if missing. The caller LLM does the semantic merge and passes the final patch text — this tool deliberately does not try to be clever.',
   input,
   output,
-  async execute({ stock_id, patch_md, section }) {
+  async execute({ stock_id, patch_md, section }, ctx) {
+    await assertOwnsStock(stock_id, ctx);
     const existing = (
       await db
         .select()

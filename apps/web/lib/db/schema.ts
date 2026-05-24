@@ -135,7 +135,16 @@ export const stocks = pgTable(
     addedAt: timestamp('added_at', { withTimezone: true }).defaultNow().notNull(),
   },
   (t) => ({
-    bySymbolExchange: uniqueIndex('stocks_symbol_exchange_uq').on(t.symbol, t.exchange),
+    // Per-portfolio unique — same symbol+exchange can appear in different
+    // users' portfolios, each as its own stocks row, so that their events /
+    // future_events / business_context (cascaded from stock_id) stay isolated.
+    // The old single-tenant unique on (symbol, exchange) was dropped in a
+    // runtime migration (see ensure-schema.ts).
+    byPortfolioSymbolExchange: uniqueIndex('stocks_portfolio_symbol_exchange_uq').on(
+      t.portfolioId,
+      t.symbol,
+      t.exchange,
+    ),
     byPortfolio: index('stocks_portfolio_idx').on(t.portfolioId),
   }),
 );

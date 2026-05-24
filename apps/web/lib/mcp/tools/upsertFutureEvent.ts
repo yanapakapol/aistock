@@ -3,6 +3,7 @@ import { and, eq } from 'drizzle-orm';
 import { db } from '@/lib/db/client';
 import { futureEvents } from '@/lib/db/schema';
 import type { ToolHandler } from '../types';
+import { assertOwnsStock } from '../ownership';
 
 const input = z.object({
   stock_id: z.number().int().positive(),
@@ -29,7 +30,8 @@ export const upsertFutureEvent: ToolHandler<Input, Output> = {
     'Insert a forward-looking event, or update the existing row if (stock_id, expected_date, title) already match. Used to record earnings calendars, expected announcements, and regulatory dates with probability estimates.',
   input,
   output,
-  async execute(args) {
+  async execute(args, ctx) {
+    await assertOwnsStock(args.stock_id, ctx);
     const existing = (
       await db
         .select({ id: futureEvents.id })

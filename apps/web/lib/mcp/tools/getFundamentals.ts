@@ -3,6 +3,7 @@ import { and, desc, eq, inArray } from 'drizzle-orm';
 import { db } from '@/lib/db/client';
 import { fundamentals } from '@/lib/db/schema';
 import type { ToolHandler } from '../types';
+import { assertOwnsStock } from '../ownership';
 
 const input = z.object({
   stock_id: z.number().int().positive(),
@@ -29,7 +30,8 @@ export const getFundamentals: ToolHandler<Input, Output> = {
     'Fundamental metrics (revenue, eps, pe, etc.) recorded for a stock. Filters by the supplied metric names. Most recent fetch first.',
   input,
   output,
-  async execute({ stock_id, metrics }) {
+  async execute({ stock_id, metrics }, ctx) {
+    await assertOwnsStock(stock_id, ctx);
     const rows = await db
       .select()
       .from(fundamentals)

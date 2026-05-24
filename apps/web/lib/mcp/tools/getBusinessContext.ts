@@ -3,6 +3,7 @@ import { eq } from 'drizzle-orm';
 import { db } from '@/lib/db/client';
 import { businessContext } from '@/lib/db/schema';
 import type { ToolHandler } from '../types';
+import { assertOwnsStock } from '../ownership';
 
 const input = z.object({ stock_id: z.number().int().positive() });
 type Input = z.infer<typeof input>;
@@ -22,7 +23,8 @@ export const getBusinessContext: ToolHandler<Input, Output> = {
     'Returns the merged business-context document for a stock (summary, historical timeline, forward outlook). Empty strings if no row has been written yet.',
   input,
   output,
-  async execute({ stock_id }) {
+  async execute({ stock_id }, ctx) {
+    await assertOwnsStock(stock_id, ctx);
     const row = (
       await db
         .select()

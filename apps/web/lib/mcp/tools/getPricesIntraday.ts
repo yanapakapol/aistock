@@ -3,6 +3,7 @@ import { and, between, eq, asc } from 'drizzle-orm';
 import { db } from '@/lib/db/client';
 import { pricesIntraday } from '@/lib/db/schema';
 import type { ToolHandler } from '../types';
+import { assertOwnsStock } from '../ownership';
 
 const input = z.object({
   stock_id: z.number().int().positive(),
@@ -38,7 +39,8 @@ export const getPricesIntraday: ToolHandler<Input, Output> = {
     'Intraday OHLCV bars stored around event timestamps. Returns rows from prices_intraday for the given stock within ±window_days of around_ts at the requested interval.',
   input,
   output,
-  async execute({ stock_id, around_ts, window_days, interval }) {
+  async execute({ stock_id, around_ts, window_days, interval }, ctx) {
+    await assertOwnsStock(stock_id, ctx);
     const center = new Date(around_ts);
     if (Number.isNaN(center.getTime())) {
       throw new Error(`around_ts is not a valid timestamp: ${around_ts}`);

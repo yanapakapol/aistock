@@ -25,6 +25,22 @@ declare global {
   var __schemaEnsured: Promise<void> | undefined;
 }
 
+/**
+ * Per-statement helper that scopes each DDL to a short transaction with
+ * its own lock_timeout / statement_timeout. Without this, a DROP INDEX
+ * waiting on a leaked SHARE lock would hang forever and block every
+ * route that awaits ensureSchema(). The wider ensureSchema() routine
+ * already wraps the whole thing in try/catch around per-statement
+ * failures so one stuck DDL doesn't poison the rest.
+ */
+async function runDDL(stmt: ReturnType<typeof sql>): Promise<void> {
+  await db.transaction(async (tx) => {
+    await tx.execute(sql`SET LOCAL lock_timeout = '5s'`);
+    await tx.execute(sql`SET LOCAL statement_timeout = '15s'`);
+    await tx.execute(stmt);
+  });
+}
+
 async function runBumps(): Promise<void> {
   // Auth schema (users + per-user caps + token usage rollup).
   await db.execute(sql`CREATE TABLE IF NOT EXISTS users (
@@ -77,6 +93,36 @@ async function runBumps(): Promise<void> {
             ON cap_requests (status, created_at DESC)`);
   await db.execute(sql`CREATE INDEX IF NOT EXISTS cap_requests_user_idx
             ON cap_requests (user_id, created_at DESC)`);
+
+  // Per-portfolio stocks (multi-tenant isolation). The old single-tenant
+  // unique on stocks(symbol, exchange) prevented user B from adding a
+  // symbol that already existed in user A's portfolio — and silently
+  // shared all the cascaded events/business_context across users. Drop
+  // it, replace with a per-portfolio composite.
+  //
+  // Both wrapped so a transient lock contention (e.g. a long-running query
+  // holding stocks open) doesn't abort the whole bump. On lock_timeout we
+  // log and keep going; next request will retry.
+  // These two are the only DDL that might contend on a held lock (stocks
+  // is the busy table). Run them via runDDL so a stuck lock fails fast
+  // instead of hanging the whole route through ensureSchema(). Other DDL
+  // above runs on tables that nothing else touches at boot, so the extra
+  // transaction overhead isn't worth it for them.
+  try {
+    await runDDL(sql`DROP INDEX IF EXISTS stocks_symbol_exchange_uq`);
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.warn('[ensureSchema] DROP stocks_symbol_exchange_uq skipped:', err);
+  }
+  try {
+    await runDDL(sql`
+      CREATE UNIQUE INDEX IF NOT EXISTS stocks_portfolio_symbol_exchange_uq
+      ON stocks (portfolio_id, symbol, exchange)
+    `);
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.warn('[ensureSchema] CREATE stocks_portfolio_symbol_exchange_uq skipped:', err);
+  }
 }
 
 /**

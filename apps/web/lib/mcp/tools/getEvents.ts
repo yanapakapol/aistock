@@ -3,6 +3,7 @@ import { and, between, eq, desc, gte, lte } from 'drizzle-orm';
 import { db } from '@/lib/db/client';
 import { events } from '@/lib/db/schema';
 import type { ToolHandler } from '../types';
+import { assertOwnsStock } from '../ownership';
 
 const input = z.object({
   stock_id: z.number().int().positive(),
@@ -36,7 +37,8 @@ export const getEvents: ToolHandler<Input, Output> = {
     'Historical events recorded for a stock, optionally filtered by date range. Most recent first. Returns up to `limit` rows (default 100).',
   input,
   output,
-  async execute({ stock_id, from, to, limit }) {
+  async execute({ stock_id, from, to, limit }, ctx) {
+    await assertOwnsStock(stock_id, ctx);
     const conds = [eq(events.stockId, stock_id)];
     if (from && to) conds.push(between(events.eventDate, from, to));
     else if (from) conds.push(gte(events.eventDate, from));

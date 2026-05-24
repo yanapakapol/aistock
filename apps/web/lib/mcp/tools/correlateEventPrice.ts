@@ -5,6 +5,7 @@ import { events, pricesDaily, stocks } from '@/lib/db/schema';
 import { getAdapter } from '@/lib/market';
 import type { Exchange, Ohlcv } from '@/lib/market/types';
 import type { ToolHandler } from '../types';
+import { assertOwnsStock } from '../ownership';
 
 const input = z.object({
   event_id: z.number().int().positive(),
@@ -130,11 +131,12 @@ export const correlateEventPrice: ToolHandler<Input, Output> = {
     'Given an event id, fetch ±window_days of daily closes and report the pre/post returns, plus market-relative excess return vs. the exchange-appropriate index (e.g. ^GSPC for US, ^HSI for HK).',
   input,
   output,
-  async execute({ event_id, window_days }) {
+  async execute({ event_id, window_days }, ctx) {
     const ev = (
       await db.select().from(events).where(eq(events.id, event_id)).limit(1)
     )[0];
     if (!ev) throw new Error(`event ${event_id} not found`);
+    await assertOwnsStock(ev.stockId, ctx);
 
     const eventDateStr = ev.eventDate as unknown as string;
     const center = new Date(eventDateStr + 'T00:00:00Z');

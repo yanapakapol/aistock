@@ -4,6 +4,7 @@ import { and, asc, eq, gte, lte } from 'drizzle-orm';
 import { db } from '@/lib/db/client';
 import { pricesDaily } from '@/lib/db/schema';
 import { getStockById } from '@/lib/portfolio/queries';
+import { getCurrentUser } from '@/lib/auth/session';
 
 export const runtime = 'nodejs';
 
@@ -25,6 +26,9 @@ export async function GET(
   req: NextRequest,
   { params }: { params: Promise<{ stockId: string }> },
 ) {
+  const me = await getCurrentUser().catch(() => null);
+  if (!me) return NextResponse.json({ error: 'unauthorized' }, { status: 401 });
+
   const { stockId: stockIdRaw } = await params;
   const stockIdParsed = StockIdSchema.safeParse(stockIdRaw);
   if (!stockIdParsed.success) {
@@ -41,7 +45,9 @@ export async function GET(
     return NextResponse.json({ error: 'bad request' }, { status: 400 });
   }
 
-  const stock = await getStockById(stockId);
+  // Ownership-scoped lookup. Returns null when the stock is not in the caller's
+  // portfolios — we report 404 to avoid leaking the existence of other users' ids.
+  const stock = await getStockById(stockId, me.id);
   if (!stock) {
     return NextResponse.json({ error: 'stock not found' }, { status: 404 });
   }

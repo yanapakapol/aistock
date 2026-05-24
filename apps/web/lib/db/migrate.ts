@@ -143,6 +143,11 @@ async function main() {
   await sql`CREATE INDEX IF NOT EXISTS cap_requests_user_idx
             ON cap_requests (user_id, created_at DESC)`;
 
+  // ---- Per-portfolio stocks (multi-tenant isolation) ----
+  await sql`DROP INDEX IF EXISTS stocks_symbol_exchange_uq`;
+  await sql`CREATE UNIQUE INDEX IF NOT EXISTS stocks_portfolio_symbol_exchange_uq
+            ON stocks (portfolio_id, symbol, exchange)`;
+
   await sql.end();
   // eslint-disable-next-line no-console
   console.log('migrated');

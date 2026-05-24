@@ -5,6 +5,7 @@ import { loadNewsKey } from '@/lib/news/keys';
 import { db } from '@/lib/db/client';
 import { stocks } from '@/lib/db/schema';
 import type { ToolHandler } from '../types';
+import { assertOwnsStock } from '../ownership';
 
 const input = z.object({
   stock_id: z.number().int().positive(),
@@ -258,7 +259,8 @@ export const searchNews: ToolHandler<Input, Output> = {
     'Web + financial news search. Fans out in parallel to every configured provider (Tavily, Exa, Finnhub company-news, EODHD news) and merges by URL. Returns ranked articles with ISO published_date so the caller can pair upsert_event with a real date. The stock_id is used to resolve the ticker for ticker-scoped sources (Finnhub, EODHD).',
   input,
   output,
-  async execute({ stock_id, query, from, to, max_results }) {
+  async execute({ stock_id, query, from, to, max_results }, ctx) {
+    await assertOwnsStock(stock_id, ctx);
     const [tavilyKey, exaKey, finnhubKey, eodhdKey] = await Promise.all([
       resolveTavilyKey(),
       loadNewsKey('exa').catch(() => null),
