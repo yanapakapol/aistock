@@ -4,7 +4,7 @@ import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { useEffect, useState } from 'react';
 import { cn } from '@/lib/utils';
-import { Search, Sparkles, Clock, Wallet, Settings, Menu, X, LogOut, Users } from 'lucide-react';
+import { Search, Sparkles, Clock, Wallet, Settings, Menu, X, LogOut, Users, Compass } from 'lucide-react';
 import { ThemeToggle } from '@/components/theme-toggle';
 import { PrefetchLink } from '@/components/prefetch-link';
 import { CapRequestButton } from '@/components/cap-request-button';
@@ -14,6 +14,7 @@ import { CapRequestButton } from '@/components/cap-request-button';
 // so the destination feels instant. Endpoints not listed here just behave like
 // plain <Link>.
 const NAV_PREFETCH: Record<string, string[]> = {
+  '/picker': ['/api/portfolio'],
   '/portfolio': ['/api/portfolio'],
   '/routines': ['/api/routines'],
   '/research': ['/api/portfolio'],
@@ -21,6 +22,7 @@ const NAV_PREFETCH: Record<string, string[]> = {
 };
 
 const nav = [
+  { href: '/picker', label: 'Picker', icon: Compass },
   { href: '/research', label: 'Research', icon: Search },
   { href: '/analysis', label: 'Analysis', icon: Sparkles },
   { href: '/routines', label: 'Routines', icon: Clock },

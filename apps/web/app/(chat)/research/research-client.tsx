@@ -79,13 +79,16 @@ export function ResearchClient({ stock }: { stock: StockLite | null }) {
   const [historyOpen, setHistoryOpen] = useState(false);
   const [dbOpen, setDbOpen] = useState(false);
   const effortRef = useRef<Effort>('medium');
-  const [dbMode, setDbMode] = useState<boolean>(false);
+  // Default ON: research benefits from being able to consult existing events to avoid duplicates.
+  const [dbMode, setDbMode] = useState<boolean>(true);
   // Persist per stock so each stock remembers its own DB-mode preference.
   useEffect(() => {
     const k = `aistock:dbMode:research:${stock?.id ?? 'global'}`;
     try {
       const raw = localStorage.getItem(k);
-      setDbMode(raw === '1');
+      // Only override the default-ON if the user has explicitly opted out ('0').
+      if (raw === '0') setDbMode(false);
+      else if (raw === '1') setDbMode(true);
     } catch {
       /* ignore */
     }

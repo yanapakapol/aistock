@@ -2,46 +2,163 @@
   {
     "id": "main-driver",
     "label": "Main driver?",
-    "prompt": "What is the single most important price driver for {{symbol}} ({{exchange}}) right now, based on the events in our database and any recent news? Cite event IDs and source URLs."
+    "prompt": "What is the single most important price driver for {{symbol}} ({{exchange}}) right now, based on the events in our database and any recent news? Cite event IDs and source URLs.",
+    "tabs": ["research", "analysis"]
   },
   {
     "id": "past-upward-triggers",
     "label": "Past upward triggers",
-    "prompt": "List the top 5 historical events that produced the largest upward price moves for {{symbol}} ({{exchange}}). For each: event date, title, % move over the next 5 trading days, and the cited event ID."
+    "prompt": "List the top 5 historical events that produced the largest upward price moves for {{symbol}} ({{exchange}}). For each: event date, title, % move over the next 5 trading days, and the cited event ID.",
+    "tabs": ["analysis"]
   },
   {
     "id": "past-downward-triggers",
     "label": "Past downward triggers",
-    "prompt": "List the top 5 historical events that produced the largest downward price moves for {{symbol}} ({{exchange}}). For each: event date, title, % move over the next 5 trading days, and the cited event ID."
+    "prompt": "List the top 5 historical events that produced the largest downward price moves for {{symbol}} ({{exchange}}). For each: event date, title, % move over the next 5 trading days, and the cited event ID.",
+    "tabs": ["analysis"]
   },
   {
     "id": "next-earnings-probability",
     "label": "Next earnings: beat odds?",
-    "prompt": "Estimate the probability that {{symbol}} ({{exchange}}) beats consensus at its next earnings release. Use future_events, recent guidance, sell-side notes, and comparable peer prints. Output: probability %, base/bull/bear scenarios, and the 3 strongest pieces of evidence with citations."
+    "prompt": "Estimate the probability that {{symbol}} ({{exchange}}) beats consensus at its next earnings release. Use future_events, recent guidance, sell-side notes, and comparable peer prints. Output: probability %, base/bull/bear scenarios, and the 3 strongest pieces of evidence with citations.",
+    "tabs": ["analysis"]
   },
   {
     "id": "gov-bigtech-backing",
     "label": "Gov / big-tech backing?",
-    "prompt": "Is {{symbol}} ({{exchange}}) currently benefiting from government policy, subsidies, defense contracts, or major big-tech partnerships? Pull from our events DB and recent news. Cite sources."
+    "prompt": "Is {{symbol}} ({{exchange}}) currently benefiting from government policy, subsidies, defense contracts, or major big-tech partnerships? Pull from our events DB and recent news. Cite sources.",
+    "tabs": ["research", "analysis"]
   },
   {
     "id": "valuation-vs-peers",
     "label": "Valuation vs peers",
-    "prompt": "Compare {{symbol}} ({{exchange}})'s valuation (P/E, EV/EBITDA, P/S, forward growth) to its 3-5 closest peers in the same sub-industry. Flag whether it looks cheap, fair, or expensive on a forward basis, and explain why."
+    "prompt": "Compare {{symbol}} ({{exchange}})'s valuation (P/E, EV/EBITDA, P/S, forward growth) to its 3-5 closest peers in the same sub-industry. Flag whether it looks cheap, fair, or expensive on a forward basis, and explain why.",
+    "tabs": ["analysis"]
   },
   {
     "id": "event-timeline",
     "label": "Event timeline",
-    "prompt": "Produce a chronological timeline of the last 20 material events for {{symbol}} ({{exchange}}) from our database. Format as a markdown table: date | event | sentiment | source. End with a 2-sentence narrative arc."
+    "prompt": "Produce a chronological timeline of the last 20 material events for {{symbol}} ({{exchange}}) from our database. Format as a markdown table: date | event | sentiment | source. End with a 2-sentence narrative arc.",
+    "tabs": ["analysis"]
   },
   {
     "id": "risk-summary",
     "label": "Risk summary",
-    "prompt": "Summarize the top 5 downside risks for holding {{symbol}} ({{exchange}}) over the next 6 months. Cover: regulatory, competitive, macro, idiosyncratic, and valuation risks. Cite evidence from our events DB and recent news."
+    "prompt": "Summarize the top 5 downside risks for holding {{symbol}} ({{exchange}}) over the next 6 months. Cover: regulatory, competitive, macro, idiosyncratic, and valuation risks. Cite evidence from our events DB and recent news.",
+    "tabs": ["analysis"]
   },
   {
     "id": "create-morning-routine",
     "label": "Create morning routine",
-    "prompt": "Create a daily morning briefing routine for {{symbol}} ({{exchange}}) at 08:00 Asia/Bangkok. The routine should: (1) summarize overnight news, (2) list any new events from our DB since yesterday, (3) flag upcoming catalysts in the next 7 days, (4) call the `create_routine` tool/action with these parameters: name=\"{{symbol}} morning brief\", cron_expr=\"0 8 * * *\", tz=\"Asia/Bangkok\", prompt=<the briefing prompt above>. If the create_routine action is not available in this session, describe exactly what it would do and what payload it would send."
+    "prompt": "Create a daily morning briefing routine for {{symbol}} ({{exchange}}) at 08:00 Asia/Bangkok. The routine should: (1) summarize overnight news, (2) list any new events from our DB since yesterday, (3) flag upcoming catalysts in the next 7 days, (4) call the `create_routine` tool/action with these parameters: name=\"{{symbol}} morning brief\", cron_expr=\"0 8 * * *\", tz=\"Asia/Bangkok\", prompt=<the briefing prompt above>. If the create_routine action is not available in this session, describe exactly what it would do and what payload it would send.",
+    "tabs": ["analysis"]
+  },
+  {
+    "id": "driver-discovery",
+    "label": "Driver discovery",
+    "prompt": "List the 5-8 primary stock-price drivers for {{symbol}} ({{exchange}}). For each driver: (1) search news from the last 12 months with a driver-specific query, (2) extract at least 3 dated events and call upsert_event for each with the source URL, event_date, sentiment, and a 1-sentence summary. Do not write a multi-phase plan — call the tools in this turn. Finish with a 5-bullet summary citing every event ID you created.",
+    "tabs": ["research"]
+  },
+  {
+    "id": "forward-catalyst-calendar",
+    "label": "Forward catalyst calendar",
+    "prompt": "Find every upcoming catalyst (earnings, FDA/regulatory decision, product launch, dividend, investor day, contract decision) for {{symbol}} ({{exchange}}) in the next 90 days. For each catalyst call upsert_future_event with: event_date (best estimate), title, category, probability (0-1), expected_impact (low/med/high), and source URL. Finish with a markdown table: date | catalyst | probability | impact.",
+    "tabs": ["research"]
+  },
+  {
+    "id": "industry-positioning",
+    "label": "Industry positioning",
+    "prompt": "Map {{symbol}} ({{exchange}})'s top 3 competitors in its sub-industry. For EACH competitor: (1) search 1-2 articles comparing them to {{symbol}}, (2) upsert_event each comparison article with a clear title like 'Competitor brief: <NAME> vs {{symbol}}'. Then call upsert_business_context with section='competitive_landscape' summarizing positioning, share, and which competitor poses the biggest threat.",
+    "tabs": ["research"]
+  },
+  {
+    "id": "insider-institutional-activity",
+    "label": "Insider + 13F activity",
+    "prompt": "Find recent insider transactions (Form 4 / equivalent) and 13F institutional ownership changes for {{symbol}} ({{exchange}}) in the last 6 months. For each material trade (>$1M or >0.5% of float) call upsert_event with source, transaction date, party, direction, and size. Finish with a 3-bullet read on insider/institutional sentiment.",
+    "tabs": ["research"]
+  },
+  {
+    "id": "bull-case-bear-case",
+    "label": "Bull case + bear case",
+    "prompt": "Build a balanced bull/bear case for {{symbol}} ({{exchange}}). Search for both bullish and bearish analyst takes from the last 6 months. For each distinct thesis call upsert_event with sentiment=bull|bear and a one-sentence headline. Finish with two markdown sections: ## Bull case (4-6 bullets) and ## Bear case (4-6 bullets) — every bullet cites an event ID.",
+    "tabs": ["research"]
+  },
+  {
+    "id": "macro-overlay",
+    "label": "Macro overlay",
+    "prompt": "Search news on macro factors (interest rates, FX moves, commodity prices, fiscal/regulatory shifts) that materially affect {{symbol}} ({{exchange}}) in the next quarter. For each material macro signal call upsert_event with category='macro' and a brief mechanism description (how it transmits to {{symbol}}'s earnings or valuation). Finish with a 3-bullet net macro read: tailwind / headwind / neutral.",
+    "tabs": ["research"]
+  },
+  {
+    "id": "esg-audit",
+    "label": "ESG audit",
+    "prompt": "Search ESG (environmental, social, governance) and regulatory news for {{symbol}} ({{exchange}}) from the last 12 months. For each material ESG event (controversy, lawsuit, rating change, board change, emissions disclosure) call upsert_event with category='esg' and sentiment. Finish with a 3-bullet ESG read: highest-impact items, trend direction, and material investor-relevant flags.",
+    "tabs": ["research"]
+  },
+  {
+    "id": "technical-setup",
+    "label": "Technical setup",
+    "prompt": "Pull the last 90 days of prices for {{symbol}} ({{exchange}}) via get_prices. Identify key support and resistance levels, current trend (up/down/sideways), 50d vs 200d moving average relationship, and recent volume profile. Call upsert_business_context with section='technical' containing: support_levels, resistance_levels, trend, ma_relationship, volume_note, and last_updated.",
+    "tabs": ["research"]
+  },
+  {
+    "id": "earnings-deep-dive",
+    "label": "Earnings deep dive",
+    "prompt": "Find the most recent earnings call transcript or summary for {{symbol}} ({{exchange}}). Call upsert_event with category='earnings' capturing: (a) revenue and EPS beat/miss vs consensus, (b) guidance changes, (c) segment commentary, (d) any forward-looking statements management made. Then upsert_future_event for the NEXT earnings date with the date from the latest filing. Reply with a 5-bullet 'what mattered most' summary.",
+    "tabs": ["research"]
+  },
+  {
+    "id": "risk-audit",
+    "label": "Risk audit",
+    "prompt": "List the top 5 specific (not generic) risks to {{symbol}} ({{exchange}})'s investment thesis. For each risk: (1) assign a current relevance score 0-10, (2) describe the trigger condition, (3) cite recent supporting news with a source URL. Call upsert_business_context with section='risks' containing the structured list. Finish with a 1-sentence net read on whether the risk picture has worsened or improved over the last 90 days.",
+    "tabs": ["research"]
+  },
+  {
+    "id": "comprehensive-deep-dive",
+    "label": "Comprehensive deep dive",
+    "prompt": "Pull get_business_context, get_events (last 20), get_future_events, get_prices (last 90d), and get_fundamentals (latest 8 quarters). Then produce a single structured report with these sections: (1) Executive summary in 5 bullets, (2) Trailing-12-month performance table (price, fundamentals, key events), (3) Consensus rating and your independent rating with rationale, (4) Next 3 catalysts with dates and probabilities, (5) Bull case + bear case, (6) Top 3 risks with relevance scores, (7) Recommendation with conviction level (low/med/high), (8) Citations section listing every URL referenced. Be specific — no generic platitudes.",
+    "tabs": ["analysis"]
+  },
+  {
+    "id": "quick-read",
+    "label": "Quick read (TL;DR)",
+    "prompt": "Give a 30-second TL;DR of {{symbol}} ({{exchange}}): (1) current setup in one sentence, (2) next catalyst with date, (3) recommendation (buy/hold/trim/sell) with one-line rationale. Use the DB first; don't search the web unless the DB is empty.",
+    "tabs": ["analysis"]
+  },
+  {
+    "id": "trade-plan",
+    "label": "Trade plan",
+    "prompt": "Given a hypothetical entry at today's price for {{symbol}} ({{exchange}}), design a complete trade plan: entry zone, primary target with rationale, stop-loss level with rationale, timeframe (days/weeks/months), and position-sizing note. Include the specific invalidation conditions that would force an early exit. Anchor the plan in the most recent events and price action from the DB.",
+    "tabs": ["analysis"]
+  },
+  {
+    "id": "compare-to-peers",
+    "label": "Compare to peers",
+    "prompt": "Compare {{symbol}} ({{exchange}}) to its top 3 sector peers across four dimensions: growth (revenue + EPS CAGR), valuation (P/E, EV/EBITDA, PEG), profitability (gross / operating / net margin, ROIC), and momentum (3M and 12M return). Output a markdown table with peers as columns. Then declare the best peer in each dimension and a final 1-paragraph verdict on where {{symbol}} ranks overall.",
+    "tabs": ["analysis"]
+  },
+  {
+    "id": "what-changed-this-week",
+    "label": "What changed since last week",
+    "prompt": "List every new event (last 7 days) and every daily price move greater than 2% for {{symbol}} ({{exchange}}). Use get_events with a date filter and get_prices. Then summarize in 5 bullets: what changed materially, what is now more / less likely, and whether the working thesis needs an update.",
+    "tabs": ["analysis"]
+  },
+  {
+    "id": "income-dividend-angle",
+    "label": "Income / dividend angle",
+    "prompt": "Pull {{symbol}} ({{exchange}})'s dividend history (last 5 years), current yield, payout ratio, free-cash-flow coverage, and the next ex-dividend date. Assess sustainability (safe / watch / at-risk) with a one-paragraph justification grounded in fundamentals. Note any recent dividend policy changes or buyback authorizations.",
+    "tabs": ["analysis"]
+  },
+  {
+    "id": "probability-ladder",
+    "label": "Probability ladder",
+    "prompt": "Estimate the probability of {{symbol}} ({{exchange}}) hitting +10%, +20%, -10%, and -20% over the next 30, 90, and 180 days. Base the estimate on historical realized volatility (from get_prices last 252d), current implied vol if available, and the catalyst calendar from get_future_events. Output a 4-column markdown table (move | 30d | 90d | 180d) and a one-paragraph caveat on model assumptions.",
+    "tabs": ["analysis"]
+  },
+  {
+    "id": "what-market-is-missing",
+    "label": "What's the market missing",
+    "prompt": "Identify 2-3 specific things the sell-side consensus is ignoring or under-pricing about {{symbol}} ({{exchange}}). For each: (1) state the under-priced thesis in one sentence, (2) cite at least one piece of evidence (event ID or URL) supporting it, (3) explain why the market may be missing it (analyst coverage gap, recency bias, sector rotation, etc.). Be contrarian but rigorous — no hand-waving.",
+    "tabs": ["analysis"]
   }
 ]
