@@ -1,58 +1,106 @@
 # aistock
 
-A single-user, self-hosted, ChatGPT-style chat platform specialized for short/mid/long-term stock research and analysis. Combines **RAG** (pgvector + pg_search hybrid recall of dated news + research notes) with **MCP tool-calling** over a structured Postgres of prices, events, fundamentals, and future-event probabilities. Multi-market: SH, SZ, HKEX, KRX, TSE, SET, US, LSE, Xetra, Euronext.
+> # 🚨 MUST READ BEFORE EDITING — for humans AND AI agents
+>
+> - **AI agents / Claude sessions:** read [`CLAUDE.md`](./CLAUDE.md) **first, in full**, before any tool call. It catalogs every landmine that has cost real hours of debugging, with the exact fix for each. It is the working memory of this project.
+> - **Humans onboarding to the codebase:** read [`docs/POSTMORTEM.md`](./docs/POSTMORTEM.md) for the narrative of how the codebase got into the state it's in (the 18-commit Vercel-deploy debug saga). Then `CLAUDE.md` for the rules.
+> - **Cloud deploy steps:** see [`docs/CLOUD_DEPLOY.md`](./docs/CLOUD_DEPLOY.md).
+>
+> **Single most important rule:** Vercel Hobby allows AT MOST 1 cron run per day. If you change `apps/web/vercel.json` to anything finer (`*/5 * * * *`, etc.) **every single deploy will silently fail** until it's reverted. We lost 6 hours and 17 phantom-fix commits to this exact bug. See `CLAUDE.md §0`.
+
+---
+
+A single-user / multi-user platform for short / mid / long-term stock research and analysis. Combines **RAG** (pgvector hybrid recall of dated news + research notes) with **MCP tool-calling** over a structured Postgres of prices, events, fundamentals, and future-event probabilities. Multi-market: SH, SZ, HKEX, KRX, TSE, SET, US, LSE, Xetra, Euronext.
 
 Three tabs:
 
 1. **Research** — AI builds a per-stock driver checklist, runs a research loop (news → dated events → price correlation), persists into the DB, summarizes on close.
 2. **AI Analysis** — chat grounded in DB + live web search, with one-click bubble prompts ("main driver", "past upward triggers", "next earnings probability", "create morning routine").
-3. **Routines** — TZ-aware scheduled prompts (GMT+7 default), same-day catch-up (capped N=3), cross-day skip, clean MD/DOCX/PDF export.
+3. **Routines** — TZ-aware scheduled prompts (GMT+7 default), driven by Vercel Cron on prod and an external poller on self-host. Clean MD / DOCX / HTML (browser-PDF) exports.
 
-## Prerequisites
-
-- **Node.js 22+**
-- **Docker** (for Postgres 16 + pgvector + pg_search, and for the app image with Pandoc + Typst)
-- **Pandoc + Typst** locally (optional — only needed if you run `apps/web` outside Docker and want export)
-
-## Quickstart
+## Quickstart (local dev)
 
 ```bash
-docker compose -f docker/docker-compose.yml up
+docker compose -f docker/docker-compose.yml up -d db   # Postgres + pgvector
+cp apps/web/.env.example apps/web/.env                  # set DATABASE_URL + MASTER_KEY
+npm install
+npm run dev                                              # http://localhost:3000
 ```
 
-App at <http://localhost:3000> (bound to 127.0.0.1 by default).
+1. Visit `/register` — the first user becomes admin.
+2. Visit `/settings` and add at least one provider API key (Mistral is the default — cheapest), plus Tavily for news.
+3. Visit `/portfolio` and add a stock (try `NVDA`, `2330.TW`, `0700.HK`, `7203.T`, `PTT.BK`).
+4. Open Research, Analysis, or Routines.
 
-1. Visit `/settings` and add at least one provider API key (OpenAI / Anthropic / Google / Mistral / Kimi / DeepSeek) plus a Tavily key for news.
-2. Visit `/portfolio` and add a stock (try `NVDA`, `2330.TW`, `0700.HK`, `7203.T`, `PTT.BK`).
-3. Open Research, Analysis, or Routines.
+Schema self-heals on first request — no separate `db:migrate` step needed.
 
-For first-run schema setup, run `npm run db:generate` then `npm run db:migrate` inside the container (or locally with `DATABASE_URL` set).
+## Cloud deploy (Vercel + Neon)
 
-## Deploy
+See [`docs/CLOUD_DEPLOY.md`](./docs/CLOUD_DEPLOY.md) for the full env-var checklist and one-command setup. Short version:
 
-See [DEPLOY.md](./DEPLOY.md) for VPS deploy notes (Hetzner / Fly), Cloudflare Tunnel + Tailscale recipes, Docker secret KEK setup, and the public-binding shared-bearer flow.
+```bash
+# Once, from your machine
+npm i -g vercel
+cd apps/web && vercel link    # link to your aistock-web-j1cz project
+vercel --prod                  # deploy
+```
 
-## Plan
+Required env vars on Vercel: `DATABASE_URL` (Neon pooler URL), `MASTER_KEY` (`openssl rand -base64 32`), `SESSION_SECRET` (optional, falls back to MASTER_KEY), `CRON_SECRET` (any random 32+ char string).
 
-Full architecture and milestone plan: [`~/.claude/plans/notes-1-introduction-sprightly-cherny.md`](../../.claude/plans/notes-1-introduction-sprightly-cherny.md).
+## After every prod deploy
+
+```bash
+node apps/web/scripts/smoke-test.mjs   # 15 checks, 6 seconds, exit 0 if healthy
+```
+
+If anything fails, the output tells you which endpoint and the response code.
+
+## Architecture summary
+
+- **Next.js 15 App Router** on Vercel Fluid Compute (Node 22)
+- **Postgres** via `@neondatabase/serverless` HTTP driver — no transactions, returns numeric as strings (`CLAUDE.md §2.1`)
+- **AI SDK v6** with first-party providers; lazy-imported per request (one cold-start cost reduced from 6 SDKs → 1)
+- **MCP tool layer** with per-tool ownership checks via `assertOwnsStock(stockId, ctx)` joining `stocks → portfolios → users.id`
+- **Envelope encryption** for API keys: per-record AES-256-GCM DEK wrapped by a KEK from `MASTER_KEY` env (cloud) or DPAPI (Windows dev)
+- **Web Crypto** session HMAC (so `/api/auth/me` + `/api/auth/login` run on Edge for lower cold-start)
+- **Per-user data isolation**: every stock-scoped query joins through `portfolios.user_id`. Each user gets their own `stocks` row even for the same `(symbol, exchange)`, with cascade delete.
+
+## Security posture
+
+- **Per-user auth.** First registered user is admin; subsequent users are `user` (own keys) or admin-created `guest` (inherits admin's keys, 7-day data TTL).
+- **Envelope-encrypted API keys.** LLM never sees raw keys; outbound is proxied through a server-side `secureFetch` allowlist.
+- **Per-user data isolation.** Every stock-scoped read/write joins through `portfolios.user_id`. Routines, chats, push subs all have `user_id` FK with CASCADE delete.
+- **MCP tool ctx** carries `userId`; every stock-scoped tool calls `assertOwnsStock` before any read.
+- **Tool-result scrubber** strips key-shaped tokens (Anthropic / OpenAI / Google patterns + high-entropy + trigger-word proximity) before they reach the LLM.
+- **CSP** locked: `default-src 'self'`, `vercel.live` only on Vercel deploys. CSRF via `Sec-Fetch-Site` enforcement.
+- **No telemetry.** No third-party error reporting.
+
+## Where to find things
+
+| What | Where |
+|---|---|
+| Critical landmines + safe-update rules | [`CLAUDE.md`](./CLAUDE.md) |
+| Debug saga post-mortem | [`docs/POSTMORTEM.md`](./docs/POSTMORTEM.md) |
+| Vercel deploy guide | [`docs/CLOUD_DEPLOY.md`](./docs/CLOUD_DEPLOY.md) |
+| Schema (Drizzle) | `apps/web/lib/db/schema.ts` |
+| Runtime schema self-heal | `apps/web/lib/db/ensure-schema.ts` |
+| Chat route (the heart of the platform) | `apps/web/app/api/chat/route.ts` |
+| MCP tool registry | `apps/web/lib/mcp/tools/index.ts` + `lazy.ts` |
+| Per-tool ownership check | `apps/web/lib/mcp/ownership.ts` |
+| Smoke test | `apps/web/scripts/smoke-test.mjs` |
+| Original master plan | [`~/.claude/plans/notes-1-introduction-sprightly-cherny.md`](../../.claude/plans/notes-1-introduction-sprightly-cherny.md) |
 
 ## Milestone status
 
-| Milestone | Status | Notes |
-|---|---|---|
-| M1 — Foundation (Next.js + Postgres + Drizzle + KeyProvider + settings + model registry) | shipped | |
-| M2 — Portfolio + market data (yahoo-finance2, daily ingest, chart) | shipped | |
-| M3 — Research tab v1 (chat proxy, scrubber, budget, MCP, ToolHandler, Tavily, research loop) | shipped | |
-| M4 — Analysis tab + RAG (pgvector hybrid, bubble registry, correlate_event_price, future events) | shipped | |
-| M5 — Routines (croner singleton, catch-up N=3, run history, export pipeline) | shipped | |
-| M6 — PWA + mobile polish (manifest, service worker, Web Push) | shipped | Push subscription persistence is a TODO — see `apps/web/app/api/push/subscribe/route.ts`. |
-| M7 — Hardening + remote (shared-bearer cookie, CSP/CSRF, allowlist, audit, budget dashboard) | shipped | Public-binding setup flow at `/setup`; see DEPLOY.md. |
-
-## Security posture (summary)
-
-- No user auth. 100% key + data safety: LLM never sees keys; outbound is proxied through a server-side `secureFetch` allowlist.
-- API keys are **envelope-encrypted** (per-record DEK, AES-256-GCM, AAD = `provider:kid:created_at`). KEK source: DPAPI on Windows dev, Docker secret in production, KMS optional.
-- Default bind `127.0.0.1`. Public binding requires `SETUP_BEARER_HMAC_SECRET` and the `/setup` flow.
-- Tool-result scrubber strips key-shaped tokens before they reach the LLM.
-- CSP locked, CSRF enforced via `Sec-Fetch-Site` + cookie-bound origin check.
-- No telemetry. No third-party error reporting.
+| Milestone | Status |
+|---|---|
+| M1 — Foundation (Next.js + Neon + Drizzle + KeyProvider + settings) | shipped |
+| M2 — Portfolio + market data | shipped |
+| M3 — Research tab v1 (chat, MCP tools, scrubber, budget, Tavily) | shipped |
+| M4 — Analysis tab + RAG (pgvector dense; BM25 disabled on Neon) | shipped |
+| M5 — Routines (Vercel Cron + runRoutineOnce, JS-only export) | shipped |
+| M6 — PWA + mobile polish | shipped |
+| M7 — Hardening + cloud deploy + smoke test + global error boundaries | shipped |
+| M8 — Per-user data isolation + guest accounts + admin user mgmt + cap requests | shipped |
+| M9 — Speed pass (Neon HTTP, lazy LLM SDKs, JWT-fast-path /me, Edge auth) | shipped |
+| M10 — Chat UI redesign (thinking-card + collapsed answer + progress bar) | shipped |
