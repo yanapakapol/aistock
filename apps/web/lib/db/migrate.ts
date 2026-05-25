@@ -170,6 +170,25 @@ async function main() {
   await sql`CREATE UNIQUE INDEX IF NOT EXISTS portfolios_user_default_uq
             ON portfolios (user_id) WHERE name = 'Default'`;
 
+  // ---- picker_jobs — two-step scan→analyze backing store ----
+  // Mirrors ensure-schema.ts. The split keeps each HTTP call under the
+  // 60s Vercel Hobby ceiling while preserving full article context and
+  // the Mistral Medium model.
+  await sql`CREATE TABLE IF NOT EXISTS picker_jobs (
+    id serial PRIMARY KEY,
+    user_id integer NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    status text NOT NULL DEFAULT 'searching',
+    params jsonb NOT NULL,
+    articles jsonb,
+    cards jsonb,
+    sources jsonb,
+    error text,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    updated_at timestamptz NOT NULL DEFAULT now()
+  )`;
+  await sql`CREATE INDEX IF NOT EXISTS picker_jobs_user_created_idx
+            ON picker_jobs (user_id, created_at DESC)`;
+
   await sql.end();
   // eslint-disable-next-line no-console
   console.log('migrated');

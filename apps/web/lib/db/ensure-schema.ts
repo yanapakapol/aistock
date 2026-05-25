@@ -615,6 +615,29 @@ async function runBumps(): Promise<void> {
     'CREATE portfolios_user_default_uq',
     `CREATE UNIQUE INDEX IF NOT EXISTS portfolios_user_default_uq ON portfolios (user_id) WHERE name = 'Default'`,
   );
+
+  // -------------------------------------------------------------------
+  // 5. picker_jobs — backing store for the two-step Stock Picker
+  //    (POST /api/picker/scan saves articles, POST /api/picker/analyze
+  //    reads them + runs the LLM). Split-job pattern keeps each HTTP
+  //    call under Vercel Hobby's 60s ceiling without dropping article
+  //    context or downgrading the model.
+  // -------------------------------------------------------------------
+  await db.execute(sql`CREATE TABLE IF NOT EXISTS picker_jobs (
+    id serial PRIMARY KEY,
+    user_id integer NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    status text NOT NULL DEFAULT 'searching',
+    params jsonb NOT NULL,
+    articles jsonb,
+    cards jsonb,
+    sources jsonb,
+    error text,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    updated_at timestamptz NOT NULL DEFAULT now()
+  )`);
+  await db.execute(
+    sql`CREATE INDEX IF NOT EXISTS picker_jobs_user_created_idx ON picker_jobs (user_id, created_at DESC)`,
+  );
 }
 
 /**

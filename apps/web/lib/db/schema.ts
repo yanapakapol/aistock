@@ -577,6 +577,43 @@ export const pushSubscriptions = pgTable(
   }),
 );
 
+// ---------- Picker jobs (two-step scan → analyze pattern) ----------
+//
+// The picker splits a single user request into TWO HTTP calls so neither
+// blows past Vercel Hobby's 60s function ceiling:
+//   1. POST /api/picker/scan   — Tavily fan-out only; saves articles here.
+//   2. POST /api/picker/analyze — reads articles, runs Mistral Medium with
+//      FULL context, saves cards here.
+// The split lets us keep long article excerpts (no truncation) and the best
+// model. If analyze times out, the articles are still on this row so the
+// user can retry analyze alone — no second Tavily round-trip.
+//
+// `status` lifecycle: searching → searched → analyzing → done | failed.
+// All large blobs are jsonb so we can read just `status` / `error` cheaply
+// from the GET /api/picker/job/:id endpoint without parsing the full row.
+export const pickerJobs = pgTable(
+  'picker_jobs',
+  {
+    id: serial('id').primaryKey(),
+    userId: integer('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    // Free-form text rather than an enum so we can add intermediate states
+    // (e.g. 'llm-streaming') without an ALTER TYPE round-trip on prod.
+    status: text('status').notNull().default('searching'),
+    params: jsonb('params').notNull(),
+    articles: jsonb('articles'),
+    cards: jsonb('cards'),
+    sources: jsonb('sources'),
+    error: text('error'),
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => ({
+    byUserCreated: index('picker_jobs_user_created_idx').on(t.userId, t.createdAt),
+  }),
+);
+
 // ---------- Provider constants (shared by other modules) ----------
 //
 // `api_keys.provider` stays an unconstrained text column so LLM and news

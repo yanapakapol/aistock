@@ -127,6 +127,13 @@ interface ScanState {
   error: string | null;
   events: ScanEvent[];
   startedAt: number;
+  // When the scan step has saved articles to picker_jobs but analyze hasn't
+  // succeeded yet, jobId is set so the "Retry analysis" button can re-trigger
+  // POST /api/picker/analyze WITHOUT re-running Tavily.
+  jobId: number | null;
+  // True when the failure was in the analyze step (so retry = analyze only).
+  // False (or null) means the scan step itself failed and retry = full rerun.
+  failedAtAnalyze: boolean;
 }
 
 const INITIAL_SCAN: ScanState = {
@@ -136,6 +143,8 @@ const INITIAL_SCAN: ScanState = {
   error: null,
   events: [],
   startedAt: 0,
+  jobId: null,
+  failedAtAnalyze: false,
 };
 
 const INITIAL_MARKET_SELECTION: MarketSelection = {
@@ -165,40 +174,23 @@ export function PickerClient() {
   const canAdvanceStep2 = sectors.length >= 1 && sectors.length <= MAX_SECTORS;
   const canSubmit = canAdvanceStep1 && canAdvanceStep2; // stock-types optional, risk has default
 
-  const runScan = useCallback(async () => {
-    if (!canSubmit) return;
-    const startedAt = Date.now();
-    setScan({
-      status: 'loading',
-      cards: [],
-      sources: [],
-      error: null,
-      events: [],
-      startedAt,
-    });
-    setStep(4);
-
-    const body: PickerScanRequest = {
-      market: marketSel.market?.id ?? null,
-      customCountries: marketSel.customCountries,
-      autoPickMarket: marketSel.autoPickMarket,
-      sectors,
-      stockTypes,
-      riskTolerance: risk,
-    };
-
-    try {
-      const res = await fetch('/api/picker/scan', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-      });
-
-      // Pre-stream errors (auth, body validation, etc.) come back as plain
-      // JSON 4xx — content-type tells us which shape to expect.
+  // ---- Shared SSE parser ----
+  // Both /api/picker/scan and /api/picker/analyze emit the same event grammar
+  // (phase / result / error / {done:true} sentinel). The orchestrator below
+  // calls this once per endpoint and feeds the streamed phase events into
+  // the SAME `events` array on ScanState so the UI shows ONE continuous
+  // timeline across both HTTP calls.
+  const consumeSse = useCallback(
+    async (
+      res: Response,
+      startedAt: number,
+      // When this returns an object, we resolve with it as the "final result".
+      // SSE only carries one `result` event so this is just the JSON payload.
+      onResultParsed?: (data: unknown) => void,
+    ): Promise<{ result: unknown | null }> => {
       const ctype = res.headers.get('content-type') ?? '';
       if (!res.ok || !ctype.includes('text/event-stream')) {
-        let msg = `Scan failed (${res.status})`;
+        let msg = `Request failed (${res.status})`;
         try {
           const j = (await res.json()) as {
             error?: string;
@@ -207,9 +199,6 @@ export function PickerClient() {
           };
           if (j?.error) {
             msg = j.detail ? `${j.error}: ${j.detail}` : j.error;
-            // If the server returned Zod issues (typical 400), spell out the
-            // first 3 so the user can see *which* fields failed instead of
-            // a flat "invalid request" message.
             if (Array.isArray(j.issues) && j.issues.length > 0) {
               const tips = j.issues
                 .slice(0, 3)
@@ -222,37 +211,30 @@ export function PickerClient() {
             }
           }
         } catch {
-          // Non-JSON, non-stream body — keep status-based message.
+          /* non-JSON body — keep status-based message */
         }
         throw new Error(msg);
       }
 
-      // SSE parser. Stream format per event:
-      //   event: <name>\ndata: <json>\n\n
-      // Buffer across reads because chunks can split mid-event.
       const reader = res.body?.getReader();
       if (!reader) throw new Error('No response body to read');
       const decoder = new TextDecoder();
       let buf = '';
       let gotResult = false;
       let gotDone = false;
-      let finalCards: StockCard[] = [];
-      let finalSources: string[] = [];
+      let finalPayload: unknown = null;
 
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
         buf += decoder.decode(value, { stream: true });
 
-        // SSE events are separated by a blank line. Split on \n\n; keep
-        // the last partial chunk (no trailing blank yet) in the buffer.
         let sepIdx: number;
         while ((sepIdx = buf.indexOf('\n\n')) !== -1) {
           const raw = buf.slice(0, sepIdx);
           buf = buf.slice(sepIdx + 2);
           if (!raw.trim()) continue;
 
-          // Parse the event lines. We only care about `event:` and `data:`.
           let evName = 'message';
           let dataStr = '';
           for (const line of raw.split('\n')) {
@@ -268,7 +250,6 @@ export function PickerClient() {
           try {
             payload = JSON.parse(dataStr);
           } catch {
-            // Skip malformed events rather than killing the whole scan.
             continue;
           }
 
@@ -291,13 +272,12 @@ export function PickerClient() {
             };
             setScan((s) => ({ ...s, events: [...s.events, ev] }));
           } else if (evName === 'result') {
-            const r = payload as { cards?: StockCard[]; sources?: string[] };
-            finalCards = Array.isArray(r.cards) ? r.cards : [];
-            finalSources = Array.isArray(r.sources) ? r.sources : [];
+            finalPayload = payload;
             gotResult = true;
+            onResultParsed?.(payload);
           } else if (evName === 'error') {
             const e = payload as { message?: string; phase?: string; kind?: string };
-            const msg = e.message ?? 'Scan failed';
+            const msg = e.message ?? 'Failed';
             setScan((s) => ({
               ...s,
               events: [
@@ -307,7 +287,6 @@ export function PickerClient() {
             }));
             throw new Error(msg);
           } else if (evName === 'message') {
-            // Default-event {done:true} sentinel.
             const m = payload as { done?: boolean };
             if (m.done) gotDone = true;
           }
@@ -315,9 +294,27 @@ export function PickerClient() {
       }
 
       if (!gotResult) {
-        throw new Error(gotDone ? 'Scan ended without results' : 'Stream closed unexpectedly');
+        throw new Error(gotDone ? 'Stream ended without results' : 'Stream closed unexpectedly');
       }
+      return { result: finalPayload };
+    },
+    [],
+  );
 
+  // ---- Phase 2: analyze step (also used by the "Retry analysis" button) ----
+  // Pulled into its own callback so the retry button can call it directly
+  // against an existing jobId without re-doing the Tavily fan-out.
+  const runAnalyze = useCallback(
+    async (jobId: number, startedAt: number): Promise<void> => {
+      const res = await fetch('/api/picker/analyze', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ jobId }),
+      });
+      const { result } = await consumeSse(res, startedAt);
+      const r = (result ?? {}) as { cards?: StockCard[]; sources?: string[] };
+      const finalCards = Array.isArray(r.cards) ? r.cards : [];
+      const finalSources = Array.isArray(r.sources) ? r.sources : [];
       setScan((s) => ({
         ...s,
         status: 'success',
@@ -325,17 +322,111 @@ export function PickerClient() {
         sources: finalSources,
         error: null,
       }));
+    },
+    [consumeSse],
+  );
+
+  // ---- Two-step orchestrator: scan → analyze ----
+  // Phase 1 (scan) does Tavily fan-out and saves articles to picker_jobs.
+  // Phase 2 (analyze) reads the articles back and runs the LLM. We stream
+  // BOTH SSE streams into the same `events` array so the UI sees a single
+  // continuous timeline (search → sources → llm-start → llm-done → result).
+  const runScan = useCallback(async () => {
+    if (!canSubmit) return;
+    const startedAt = Date.now();
+    setScan({
+      status: 'loading',
+      cards: [],
+      sources: [],
+      error: null,
+      events: [],
+      startedAt,
+      jobId: null,
+      failedAtAnalyze: false,
+    });
+    setStep(4);
+
+    const body: PickerScanRequest = {
+      market: marketSel.market?.id ?? null,
+      customCountries: marketSel.customCountries,
+      autoPickMarket: marketSel.autoPickMarket,
+      sectors,
+      stockTypes,
+      riskTolerance: risk,
+    };
+
+    let jobIdLocal: number | null = null;
+    try {
+      // ---- Phase 1: scan (search-only, saves articles) ----
+      const scanRes = await fetch('/api/picker/scan', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const { result: scanResult } = await consumeSse(scanRes, startedAt);
+      const sr = (scanResult ?? {}) as {
+        jobId?: number;
+        articleCount?: number;
+      };
+      if (typeof sr.jobId !== 'number') {
+        throw new Error('Scan completed without a jobId');
+      }
+      jobIdLocal = sr.jobId;
+      setScan((s) => ({ ...s, jobId: sr.jobId ?? null }));
+
+      // ---- Phase 2: analyze (reads articles back, runs LLM) ----
+      // Failures here are tagged `failedAtAnalyze` so the retry button can
+      // resume on the same jobId without re-spending Tavily.
+      try {
+        await runAnalyze(sr.jobId, startedAt);
+      } catch (err) {
+        setScan((s) => ({ ...s, failedAtAnalyze: true }));
+        throw err;
+      }
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Unknown error';
       setScan((s) => ({
         ...s,
         status: 'error',
+        // Keep cards/sources EMPTY on error so the grid doesn't render
+        // stale-from-previous-run data. jobId stays set so retry works.
         cards: [],
         sources: [],
         error: message,
+        jobId: jobIdLocal,
       }));
     }
-  }, [canSubmit, marketSel, sectors, stockTypes, risk]);
+  }, [canSubmit, marketSel, sectors, stockTypes, risk, consumeSse, runAnalyze]);
+
+  // ---- Retry-just-analyze ----
+  // Surfaced when the failure was on the analyze side (articles are still on
+  // the picker_jobs row). Re-POSTs /api/picker/analyze with the same jobId
+  // so we don't burn a second Tavily fan-out. The events log keeps growing
+  // so the user sees both attempts in the same timeline.
+  const retryAnalyze = useCallback(async () => {
+    const jobId = scan.jobId;
+    if (!jobId) return;
+    const startedAt = scan.startedAt || Date.now();
+    setScan((s) => ({
+      ...s,
+      status: 'loading',
+      error: null,
+      // Don't clear events — keep the running timeline so the user sees the
+      // retry as a continuation of the previous attempt.
+      failedAtAnalyze: false,
+    }));
+    try {
+      await runAnalyze(jobId, startedAt);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Unknown error';
+      setScan((s) => ({
+        ...s,
+        status: 'error',
+        error: message,
+        failedAtAnalyze: true,
+      }));
+    }
+  }, [scan.jobId, scan.startedAt, runAnalyze]);
 
   const resetToStart = useCallback(() => {
     setStep(1);
@@ -430,7 +521,10 @@ export function PickerClient() {
             error={scan.error}
             events={scan.events}
             startedAt={scan.startedAt}
+            failedAtAnalyze={scan.failedAtAnalyze}
+            jobId={scan.jobId}
             onRetry={runScan}
+            onRetryAnalyze={retryAnalyze}
             onReset={resetToStart}
           />
         ) : null}
@@ -578,7 +672,10 @@ function Step4({
   error,
   events,
   startedAt,
+  failedAtAnalyze,
+  jobId,
   onRetry,
+  onRetryAnalyze,
   onReset,
 }: {
   status: ScanState['status'];
@@ -586,10 +683,18 @@ function Step4({
   error: string | null;
   events: ScanEvent[];
   startedAt: number;
+  failedAtAnalyze: boolean;
+  jobId: number | null;
   onRetry: () => void;
+  onRetryAnalyze: () => void;
   onReset: () => void;
 }) {
   if (status === 'error') {
+    // If the failure was on the analyze side AND we still have the jobId,
+    // surface a dedicated "Retry analysis" path that re-runs ONLY the LLM
+    // step against the same saved articles. This avoids a second Tavily
+    // round-trip (and its cost) when the user just hit an LLM hiccup.
+    const canRetryAnalyzeOnly = failedAtAnalyze && jobId !== null;
     return (
       <section className="mx-auto max-w-4xl">
         <div
@@ -599,16 +704,34 @@ function Step4({
           <div className="flex items-start gap-2">
             <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
             <div>
-              <div className="font-medium">Scan failed</div>
+              <div className="font-medium">
+                {canRetryAnalyzeOnly ? 'Analysis failed' : 'Scan failed'}
+              </div>
               <div className="mt-1 break-words opacity-90">
                 {error ?? 'Unknown error'}
               </div>
+              {canRetryAnalyzeOnly ? (
+                <div className="mt-1 text-xs opacity-70">
+                  Articles are saved (job #{jobId}); retry just re-runs the LLM
+                  step — no extra web-search spend.
+                </div>
+              ) : null}
             </div>
           </div>
-          <div className="flex gap-2">
-            <Button size="sm" onClick={onRetry}>
+          <div className="flex flex-wrap gap-2">
+            {canRetryAnalyzeOnly ? (
+              <Button size="sm" onClick={onRetryAnalyze}>
+                <RotateCw className="h-3.5 w-3.5" />
+                Retry analysis
+              </Button>
+            ) : null}
+            <Button
+              size="sm"
+              variant={canRetryAnalyzeOnly ? 'outline' : 'default'}
+              onClick={onRetry}
+            >
               <RotateCw className="h-3.5 w-3.5" />
-              Try again
+              {canRetryAnalyzeOnly ? 'Full rerun' : 'Try again'}
             </Button>
             <Button size="sm" variant="outline" onClick={onReset}>
               Start over
