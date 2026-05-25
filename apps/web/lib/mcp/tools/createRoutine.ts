@@ -2,8 +2,20 @@ import { z } from 'zod';
 import { CronExpressionParser } from 'cron-parser';
 import { db } from '@/lib/db/client';
 import { routines } from '@/lib/db/schema';
-import { getScheduler } from '@/lib/scheduler';
 import type { ToolHandler } from '../types';
+
+// NOTE — DO NOT static-import `@/lib/scheduler` at the top of this file.
+// Doing so creates a circular dependency:
+//   createRoutine → lib/scheduler/index → runner → run → mcp/tools/index
+//   → re-imports createRoutine while it's still mid-init → TDZ error
+//   "Cannot access 'createRoutine' before initialization" in the webpack
+//   minified prod bundle, manifesting as `/api/chat` returning empty 500s
+//   for EVERY request (not just create_routine ones — the whole chat module
+//   fails to load).
+// The `viaBarrel` workaround in lazy.ts hid the cycle in dev but webpack's
+// production hoisting still tripped it. Lazy-importing inside `execute()`
+// breaks the static cycle entirely: scheduler only loads at request time,
+// long after all module init has settled.
 
 const input = z.object({
   name: z.string().min(1).max(120),
@@ -75,8 +87,12 @@ export const createRoutine: ToolHandler<Input, Output> = {
     const routineId = inserted?.id;
     if (routineId == null) throw new Error('create_routine: insert returned no id');
 
-    // Best-effort arm the scheduler. If it's not running (e.g. tests), swallow.
+    // Best-effort arm the scheduler. If it's not running (e.g. tests, or
+    // Vercel serverless where the in-process scheduler is intentionally
+    // disabled), swallow. Lazy-import so the static import cycle above is
+    // never re-created.
     try {
+      const { getScheduler } = await import('@/lib/scheduler');
       await getScheduler().reload(routineId);
     } catch {
       // non-fatal
