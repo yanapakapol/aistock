@@ -105,11 +105,28 @@ const MAX_SECTORS = 5;
 
 type Step = 1 | 2 | 3 | 4;
 
+// One progress event from the SSE stream. Mirrors what scan-progress.tsx
+// expects so we can pass it straight through. `at` is the client-side
+// receive timestamp (ms since the scan started).
+export type ScanEvent =
+  | {
+      type: 'phase';
+      name: string;
+      detail: string;
+      query?: number;
+      of?: number;
+      count?: number;
+      at: number;
+    }
+  | { type: 'error'; message: string; at: number };
+
 interface ScanState {
   status: 'idle' | 'loading' | 'success' | 'error';
   cards: StockCard[];
   sources: string[];
   error: string | null;
+  events: ScanEvent[];
+  startedAt: number;
 }
 
 const INITIAL_SCAN: ScanState = {
@@ -117,6 +134,8 @@ const INITIAL_SCAN: ScanState = {
   cards: [],
   sources: [],
   error: null,
+  events: [],
+  startedAt: 0,
 };
 
 const INITIAL_MARKET_SELECTION: MarketSelection = {
@@ -148,7 +167,15 @@ export function PickerClient() {
 
   const runScan = useCallback(async () => {
     if (!canSubmit) return;
-    setScan({ status: 'loading', cards: [], sources: [], error: null });
+    const startedAt = Date.now();
+    setScan({
+      status: 'loading',
+      cards: [],
+      sources: [],
+      error: null,
+      events: [],
+      startedAt,
+    });
     setStep(4);
 
     const body: PickerScanRequest = {
@@ -166,25 +193,128 @@ export function PickerClient() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
       });
-      if (!res.ok) {
-        // Best-effort to surface server-shaped errors; fall back to status text
-        // if the body isn't JSON or doesn't include a message.
+
+      // Pre-stream errors (auth, body validation, etc.) come back as plain
+      // JSON 4xx — content-type tells us which shape to expect.
+      const ctype = res.headers.get('content-type') ?? '';
+      if (!res.ok || !ctype.includes('text/event-stream')) {
         let msg = `Scan failed (${res.status})`;
         try {
           const j = (await res.json()) as { error?: string; detail?: string };
           if (j?.error) msg = j.detail ? `${j.error}: ${j.detail}` : j.error;
         } catch {
-          /* non-JSON body — keep status-based message */
+          // Non-JSON, non-stream body — keep status-based message.
         }
         throw new Error(msg);
       }
-      const data = (await res.json()) as PickerScanResponse;
-      const cards = Array.isArray(data?.cards) ? data.cards : [];
-      const sources = Array.isArray(data?.sources) ? data.sources : [];
-      setScan({ status: 'success', cards, sources, error: null });
+
+      // SSE parser. Stream format per event:
+      //   event: <name>\ndata: <json>\n\n
+      // Buffer across reads because chunks can split mid-event.
+      const reader = res.body?.getReader();
+      if (!reader) throw new Error('No response body to read');
+      const decoder = new TextDecoder();
+      let buf = '';
+      let gotResult = false;
+      let gotDone = false;
+      let finalCards: StockCard[] = [];
+      let finalSources: string[] = [];
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+
+        // SSE events are separated by a blank line. Split on \n\n; keep
+        // the last partial chunk (no trailing blank yet) in the buffer.
+        let sepIdx: number;
+        while ((sepIdx = buf.indexOf('\n\n')) !== -1) {
+          const raw = buf.slice(0, sepIdx);
+          buf = buf.slice(sepIdx + 2);
+          if (!raw.trim()) continue;
+
+          // Parse the event lines. We only care about `event:` and `data:`.
+          let evName = 'message';
+          let dataStr = '';
+          for (const line of raw.split('\n')) {
+            if (line.startsWith('event:')) {
+              evName = line.slice(6).trim();
+            } else if (line.startsWith('data:')) {
+              dataStr += (dataStr ? '\n' : '') + line.slice(5).trim();
+            }
+          }
+          if (!dataStr) continue;
+
+          let payload: unknown;
+          try {
+            payload = JSON.parse(dataStr);
+          } catch {
+            // Skip malformed events rather than killing the whole scan.
+            continue;
+          }
+
+          if (evName === 'phase') {
+            const p = payload as {
+              name?: string;
+              detail?: string;
+              query?: number;
+              of?: number;
+              count?: number;
+            };
+            const ev: ScanEvent = {
+              type: 'phase',
+              name: String(p.name ?? 'phase'),
+              detail: String(p.detail ?? ''),
+              query: p.query,
+              of: p.of,
+              count: p.count,
+              at: Date.now() - startedAt,
+            };
+            setScan((s) => ({ ...s, events: [...s.events, ev] }));
+          } else if (evName === 'result') {
+            const r = payload as { cards?: StockCard[]; sources?: string[] };
+            finalCards = Array.isArray(r.cards) ? r.cards : [];
+            finalSources = Array.isArray(r.sources) ? r.sources : [];
+            gotResult = true;
+          } else if (evName === 'error') {
+            const e = payload as { message?: string; phase?: string; kind?: string };
+            const msg = e.message ?? 'Scan failed';
+            setScan((s) => ({
+              ...s,
+              events: [
+                ...s.events,
+                { type: 'error', message: msg, at: Date.now() - startedAt },
+              ],
+            }));
+            throw new Error(msg);
+          } else if (evName === 'message') {
+            // Default-event {done:true} sentinel.
+            const m = payload as { done?: boolean };
+            if (m.done) gotDone = true;
+          }
+        }
+      }
+
+      if (!gotResult) {
+        throw new Error(gotDone ? 'Scan ended without results' : 'Stream closed unexpectedly');
+      }
+
+      setScan((s) => ({
+        ...s,
+        status: 'success',
+        cards: finalCards,
+        sources: finalSources,
+        error: null,
+      }));
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Unknown error';
-      setScan({ status: 'error', cards: [], sources: [], error: message });
+      setScan((s) => ({
+        ...s,
+        status: 'error',
+        cards: [],
+        sources: [],
+        error: message,
+      }));
     }
   }, [canSubmit, marketSel, sectors, stockTypes, risk]);
 
@@ -279,6 +409,8 @@ export function PickerClient() {
             status={scan.status}
             cards={scan.cards}
             error={scan.error}
+            events={scan.events}
+            startedAt={scan.startedAt}
             onRetry={runScan}
             onReset={resetToStart}
           />
@@ -425,12 +557,16 @@ function Step4({
   status,
   cards,
   error,
+  events,
+  startedAt,
   onRetry,
   onReset,
 }: {
   status: ScanState['status'];
   cards: StockCard[];
   error: string | null;
+  events: ScanEvent[];
+  startedAt: number;
   onRetry: () => void;
   onReset: () => void;
 }) {
@@ -464,14 +600,15 @@ function Step4({
     );
   }
 
-  // NOTE: The richer scan-progress UI lives in components/picker/scan-progress.tsx,
-  // which is owned by a parallel agent. Until that ships we lean on the
-  // existing grid's loading skeleton — it's a complete fallback, not a stub.
+  // StockCardGrid takes optional events + startedAt and renders ScanProgress
+  // when loading is true. When loading is false it renders the card grid.
   return (
     <section className="mx-auto max-w-7xl">
       <StockCardGrid
         cards={cards}
         loading={status === 'loading'}
+        events={events}
+        startedAt={startedAt}
       />
     </section>
   );
