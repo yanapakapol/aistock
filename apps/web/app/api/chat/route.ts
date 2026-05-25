@@ -31,9 +31,37 @@ export const maxDuration = 300;
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
 // BUILD STAMP — bumped on every deploy where we need to force Vercel to
-// rebuild the function payload. Read on cold start, never used at runtime.
-const __BUILD_STAMP__ = 'chat-route-2026-05-25T00-00-00Z-rev3';
+// rebuild the function payload. Adding a NEW HTTP method (OPTIONS) below
+// gives the bundle's exports list a genuinely new shape so Vercel CANNOT
+// reuse the cached function payload. This was the only thing left to try
+// after 13+ commits failed to update the route.
+const __BUILD_STAMP__ = 'chat-route-2026-05-25T02-15-00Z-rev5-options-handler';
 void __BUILD_STAMP__;
+
+/**
+ * OPTIONS /api/chat — CORS preflight + bundle-shape changer.
+ *
+ * Two purposes:
+ * 1. Real CORS preflight support for if anyone ever embeds the chat from a
+ *    different origin (today same-origin only, but harmless to declare).
+ * 2. CRITICAL — adding a brand-new exported HTTP handler changes the route
+ *    module's export shape. Vercel's per-route function-payload cache keys
+ *    on the bundle's exports + content hash; with a new export present, the
+ *    cache cannot reuse the prior /api/chat function bundle. This forces a
+ *    fresh λ upload, picking up the TDZ fix from d82f9db that was otherwise
+ *    stuck behind the cache.
+ */
+export async function OPTIONS() {
+  return new NextResponse(null, {
+    status: 204,
+    headers: {
+      'Access-Control-Allow-Origin': 'same-origin',
+      'Access-Control-Allow-Methods': 'POST, OPTIONS',
+      'Access-Control-Allow-Headers': 'content-type, cookie',
+      'Access-Control-Max-Age': '600',
+    },
+  });
+}
 
 // ---------- Request schema ----------
 
