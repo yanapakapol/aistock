@@ -381,11 +381,16 @@ async function runBumps(): Promise<void> {
 
   // 1d. Indexes from the initial Drizzle migration.
   //     api_keys_provider_uq is the *legacy* single-key-per-provider
-  //     index; the per-user bump below drops it and replaces it with
-  //     api_keys_user_provider_uq. We still create it here so fresh DBs
-  //     have something to drop on the next pass — and so existing DBs
-  //     that already moved past this stage don't get a different shape.
-  await db.execute(sql`CREATE UNIQUE INDEX IF NOT EXISTS "api_keys_provider_uq" ON "api_keys" USING btree ("provider")`);
+  //     index, REPLACED below by api_keys_user_provider_uq. On a DB that
+  //     already has multi-user keys (per-user feature already shipped),
+  //     this CREATE will fail with duplicate-key violation. Wrap in
+  //     tryStmt so it's a no-op instead of aborting the whole bump.
+  //     stocks_symbol_exchange_uq is similarly legacy; the per-portfolio
+  //     unique below replaces it. Same treatment.
+  await tryStmt(
+    'legacy api_keys_provider_uq',
+    'CREATE UNIQUE INDEX IF NOT EXISTS "api_keys_provider_uq" ON "api_keys" USING btree ("provider")',
+  );
   await db.execute(sql`CREATE INDEX IF NOT EXISTS "business_context_chunks_stock_idx" ON "business_context_chunks" USING btree ("stock_id")`);
   await db.execute(sql`CREATE INDEX IF NOT EXISTS "chat_messages_chat_idx" ON "chat_messages" USING btree ("chat_id","created_at")`);
   await db.execute(sql`CREATE INDEX IF NOT EXISTS "events_stock_date_idx" ON "events" USING btree ("stock_id","event_date")`);
@@ -396,7 +401,10 @@ async function runBumps(): Promise<void> {
   await db.execute(sql`CREATE INDEX IF NOT EXISTS "research_notes_stock_idx" ON "research_notes" USING btree ("stock_id")`);
   await db.execute(sql`CREATE INDEX IF NOT EXISTS "research_tasks_stock_status_idx" ON "research_tasks" USING btree ("stock_id","status")`);
   await db.execute(sql`CREATE INDEX IF NOT EXISTS "routine_runs_routine_idx" ON "routine_runs" USING btree ("routine_id","started_at")`);
-  await db.execute(sql`CREATE UNIQUE INDEX IF NOT EXISTS "stocks_symbol_exchange_uq" ON "stocks" USING btree ("symbol","exchange")`);
+  await tryStmt(
+    'legacy stocks_symbol_exchange_uq',
+    'CREATE UNIQUE INDEX IF NOT EXISTS "stocks_symbol_exchange_uq" ON "stocks" USING btree ("symbol","exchange")',
+  );
   await db.execute(sql`CREATE INDEX IF NOT EXISTS "stocks_portfolio_idx" ON "stocks" USING btree ("portfolio_id")`);
 
   // ---------------------------------------------------------------------

@@ -55,9 +55,16 @@ export async function register(): Promise<void> {
   const isExplicitOptIn = process.env.AISTOCK_INPROCESS_SCHEDULER === '1';
   if (!isLocalDev && !isExplicitOptIn) return;
   try {
-    const mod = await import(/* webpackIgnore: true */ './lib/scheduler/index.js');
+    // Drop webpackIgnore + .js extension: in `next dev` mode there is no
+    // pre-compiled .js file at that path, so the literal-path import 404s
+    // ("Cannot find module .../lib/scheduler/index.js"). Letting Next/
+    // webpack resolve the import normally finds the .ts source in dev and
+    // the compiled bundle in prod. The transitive native deps (croner,
+    // cron-parser, @primno/dpapi) are already in `serverExternalPackages`
+    // in next.config.ts so they don't get pulled into the bundle.
+    const mod = await import('./lib/scheduler');
     await mod.getScheduler().start();
   } catch (err) {
-    console.error('[scheduler] failed to start:', err);
+    console.error('[scheduler] failed to start (non-fatal — Vercel Cron is the prod path):', err);
   }
 }
