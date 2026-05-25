@@ -10,8 +10,19 @@ import { loadApiKey } from '../llm/keys';
 import { listModels } from '../llm/models';
 import { clientFor } from '../llm/clientFor';
 
-import { TOOLS } from '../mcp/tools';
+// CRITICAL — DO NOT static-import `../mcp/tools` here.
+// The mcp/tools barrel re-exports createRoutine, which (transitively, via
+// lib/scheduler/index → runner → THIS FILE) would circle back to the barrel
+// while createRoutine.ts is still mid-init. Result on Vercel's prod webpack
+// minified bundle: `ReferenceError: Cannot access 'm' before initialization
+// at Module.createRoutine` — surfacing as /api/chat returning empty-body 500
+// for every request, because the chat route's lazy-tool loader transitively
+// hits this barrel.
+//
+// Lazy-import TOOLS inside runRoutineOnce instead. Scheduler is a privileged
+// cron caller — a small extra await at run-time has zero observable cost.
 import { toAiSdkTool } from '../mcp/adapters/aiSdk';
+import type { ToolHandler } from '../mcp/types';
 
 import { meter } from '../cost/meter';
 import { addSpend, checkBudgetOrThrow } from '../cost/ledger';
@@ -139,6 +150,13 @@ export async function runRoutineOnce(routine: RoutineForRun): Promise<void> {
 
   try {
     const capUsd = Number(routine.maxUsdPerRun) || 0;
+    // Lazy-load TOOLS to break the static import cycle through
+    // mcp/tools/index → createRoutine → @/lib/scheduler. See top-of-file
+    // comment for the full chain. The await here is a no-op after the
+    // first call (Node's module cache resolves it instantly).
+    const { TOOLS } = (await import('../mcp/tools')) as {
+      TOOLS: Array<ToolHandler<unknown, unknown>>;
+    };
     const tools = Object.fromEntries(TOOLS.map((t) => [t.name, toAiSdkTool(t)]));
     const messages: ModelMessage[] = [{ role: 'user', content: routine.prompt }];
     const tokensInEst = Math.ceil(routine.prompt.length / CHARS_PER_TOKEN);
