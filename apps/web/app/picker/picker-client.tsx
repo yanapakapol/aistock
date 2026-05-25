@@ -4,8 +4,21 @@ import { useCallback, useMemo, useState } from 'react';
 import { ChevronLeft, AlertTriangle, RotateCw } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
-import { MARKETS, MarketSelector, type Market } from '@/components/picker/market-selector';
+import {
+  MARKETS,
+  MarketSelector,
+  type Market,
+  type MarketSelection,
+} from '@/components/picker/market-selector';
 import { SectorSelector } from '@/components/picker/sector-selector';
+import {
+  StockTypeSelector,
+  type StockType,
+} from '@/components/picker/stock-type-selector';
+import {
+  RiskToleranceSlider,
+  type RiskTolerance,
+} from '@/components/picker/risk-tolerance-slider';
 import { StockCardGrid } from '@/components/picker/stock-card-grid';
 
 // ---------------------------------------------------------------------------
@@ -52,6 +65,25 @@ export interface PickerScanResponse {
   sources: string[];
 }
 
+// Re-export the new wire-level enums so the API agent can `import type` them
+// from a single canonical location without us shipping a shared package.
+export type { StockType } from '@/components/picker/stock-type-selector';
+export type { RiskTolerance } from '@/components/picker/risk-tolerance-slider';
+
+// Wire shape for the POST body. Keeps the API contract explicit and lets the
+// parallel /api/picker/scan agent import this type instead of re-deriving it.
+export interface PickerScanRequest {
+  /** Predefined market id, or null when using customCountries / auto. */
+  market: string | null;
+  /** Free-form country names. Empty array when not used. */
+  customCountries: string[];
+  /** True when the user wants the model to pick the booming market(s). */
+  autoPickMarket: boolean;
+  sectors: string[];
+  stockTypes: StockType[];
+  riskTolerance: RiskTolerance;
+}
+
 // Curated list — keep small enough to scan visually but cover the 11 GICS
 // sectors. The `+ Custom sector` chip flow inside SectorSelector lets users
 // add anything missing without us having to ship a 200-entry industry tree.
@@ -71,7 +103,7 @@ export const DEFAULT_SECTORS = [
 
 const MAX_SECTORS = 5;
 
-type Step = 1 | 2 | 3;
+type Step = 1 | 2 | 3 | 4;
 
 interface ScanState {
   status: 'idle' | 'loading' | 'success' | 'error';
@@ -87,23 +119,52 @@ const INITIAL_SCAN: ScanState = {
   error: null,
 };
 
+const INITIAL_MARKET_SELECTION: MarketSelection = {
+  market: null,
+  customCountries: [],
+  autoPickMarket: false,
+};
+
+// "Have they picked something that uniquely identifies an intent for step 1?"
+// Co-located with the component so the back/next gating reads off a single
+// source of truth.
+function hasMarketIntent(sel: MarketSelection): boolean {
+  return sel.autoPickMarket || !!sel.market || sel.customCountries.length > 0;
+}
+
 export function PickerClient() {
   const [step, setStep] = useState<Step>(1);
-  const [market, setMarket] = useState<Market | null>(null);
+  const [marketSel, setMarketSel] = useState<MarketSelection>(INITIAL_MARKET_SELECTION);
   const [sectors, setSectors] = useState<string[]>([]);
+  const [stockTypes, setStockTypes] = useState<StockType[]>([]);
+  const [risk, setRisk] = useState<RiskTolerance>('medium');
   const [scan, setScan] = useState<ScanState>(INITIAL_SCAN);
 
-  const canSubmit = sectors.length >= 1 && sectors.length <= MAX_SECTORS && !!market;
+  // Per-step gating — keep these derived rather than stored so we never have
+  // a stale "can I advance" boolean lurking in state.
+  const canAdvanceStep1 = hasMarketIntent(marketSel);
+  const canAdvanceStep2 = sectors.length >= 1 && sectors.length <= MAX_SECTORS;
+  const canSubmit = canAdvanceStep1 && canAdvanceStep2; // stock-types optional, risk has default
 
   const runScan = useCallback(async () => {
-    if (!market || sectors.length === 0) return;
+    if (!canSubmit) return;
     setScan({ status: 'loading', cards: [], sources: [], error: null });
-    setStep(3);
+    setStep(4);
+
+    const body: PickerScanRequest = {
+      market: marketSel.market?.id ?? null,
+      customCountries: marketSel.customCountries,
+      autoPickMarket: marketSel.autoPickMarket,
+      sectors,
+      stockTypes,
+      riskTolerance: risk,
+    };
+
     try {
       const res = await fetch('/api/picker/scan', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ market: market.id, sectors }),
+        body: JSON.stringify(body),
       });
       if (!res.ok) {
         // Best-effort to surface server-shaped errors; fall back to status text
@@ -125,21 +186,25 @@ export function PickerClient() {
       const message = err instanceof Error ? err.message : 'Unknown error';
       setScan({ status: 'error', cards: [], sources: [], error: message });
     }
-  }, [market, sectors]);
+  }, [canSubmit, marketSel, sectors, stockTypes, risk]);
 
   const resetToStart = useCallback(() => {
     setStep(1);
-    setMarket(null);
+    setMarketSel(INITIAL_MARKET_SELECTION);
     setSectors([]);
+    setStockTypes([]);
+    setRisk('medium');
     setScan(INITIAL_SCAN);
   }, []);
 
   const goBack = useCallback(() => {
-    if (step === 3) {
+    if (step === 4) {
       // Don't keep stale results behind the back button — if the user goes
-      // back to tweak sectors they almost certainly want a fresh scan, not
+      // back to tweak inputs they almost certainly want a fresh scan, not
       // the previous one half-visible underneath.
       setScan(INITIAL_SCAN);
+      setStep(3);
+    } else if (step === 3) {
       setStep(2);
     } else if (step === 2) {
       setStep(1);
@@ -154,7 +219,7 @@ export function PickerClient() {
     <div className="flex h-full flex-col overflow-hidden">
       {/* Header — step indicator + back button. Sticky-ish via flex layout
           rather than position:sticky so the inner scroll containers (results
-          grid in step 3) work without a z-index war. */}
+          grid in step 4) work without a z-index war. */}
       <div className="flex shrink-0 items-center justify-between border-b border-border px-4 py-3">
         <div className="flex items-center gap-3">
           {step > 1 ? (
@@ -181,26 +246,36 @@ export function PickerClient() {
         {step === 1 ? (
           <Step1
             markets={markets}
-            value={market}
-            onSelect={(m) => {
-              setMarket(m);
-              setStep(2);
-            }}
+            value={marketSel}
+            onChange={setMarketSel}
+            canAdvance={canAdvanceStep1}
+            onNext={() => setStep(2)}
           />
         ) : null}
 
         {step === 2 ? (
           <Step2
-            market={market!}
+            marketSel={marketSel}
             sectors={sectors}
             setSectors={setSectors}
-            canSubmit={canSubmit}
-            onSubmit={runScan}
+            canAdvance={canAdvanceStep2}
+            onNext={() => setStep(3)}
           />
         ) : null}
 
         {step === 3 ? (
           <Step3
+            stockTypes={stockTypes}
+            setStockTypes={setStockTypes}
+            risk={risk}
+            setRisk={setRisk}
+            canSubmit={canSubmit}
+            onSubmit={runScan}
+          />
+        ) : null}
+
+        {step === 4 ? (
+          <Step4
             status={scan.status}
             cards={scan.cards}
             error={scan.error}
@@ -216,49 +291,63 @@ export function PickerClient() {
 // ---------------------------------------------------------------------------
 // Step shells — kept in this file because they're thin composition wrappers
 // and don't need to be reused. The chunky parts (market grid, sector chips,
-// card grid) are in components/picker/*.
+// stock-type cards, risk slider, card grid) are in components/picker/*.
 // ---------------------------------------------------------------------------
 
 function Step1({
   markets,
   value,
-  onSelect,
+  onChange,
+  canAdvance,
+  onNext,
 }: {
   markets: readonly Market[];
-  value: Market | null;
-  onSelect: (m: Market) => void;
+  value: MarketSelection;
+  onChange: (next: MarketSelection) => void;
+  canAdvance: boolean;
+  onNext: () => void;
 }) {
   return (
-    <section className="mx-auto max-w-4xl">
-      <h2 className="mb-1 text-lg font-semibold">Choose a market</h2>
-      <p className="mb-4 text-sm text-muted-foreground">
-        Pick the exchange or region you want to scan.
-      </p>
-      <MarketSelector markets={markets} value={value} onSelect={onSelect} />
+    <section className="mx-auto flex max-w-4xl flex-col gap-4">
+      <div>
+        <h2 className="mb-1 text-lg font-semibold">Choose a market</h2>
+        <p className="text-sm text-muted-foreground">
+          Pick an exchange, type specific countries, or let us auto-pick.
+        </p>
+      </div>
+      <MarketSelector markets={markets} value={value} onChange={onChange} />
+      <StickyFooter>
+        <Button
+          onClick={onNext}
+          disabled={!canAdvance}
+          className="w-full sm:w-auto"
+        >
+          Next
+        </Button>
+      </StickyFooter>
     </section>
   );
 }
 
 function Step2({
-  market,
+  marketSel,
   sectors,
   setSectors,
-  canSubmit,
-  onSubmit,
+  canAdvance,
+  onNext,
 }: {
-  market: Market;
+  marketSel: MarketSelection;
   sectors: string[];
   setSectors: (s: string[]) => void;
-  canSubmit: boolean;
-  onSubmit: () => void;
+  canAdvance: boolean;
+  onNext: () => void;
 }) {
   return (
     <section className="mx-auto flex max-w-4xl flex-col gap-4">
       <div>
         <h2 className="mb-1 text-lg font-semibold">Choose sectors</h2>
         <p className="text-sm text-muted-foreground">
-          Market: <span className="font-medium text-foreground">{market.label}</span> ·
-          Pick 1 to {MAX_SECTORS} sectors.
+          Scanning: <MarketSummary sel={marketSel} /> · Pick 1 to {MAX_SECTORS} sectors.
         </p>
       </div>
       <SectorSelector
@@ -267,25 +356,72 @@ function Step2({
         onChange={setSectors}
         max={MAX_SECTORS}
       />
-      <div className="sticky bottom-0 -mx-4 mt-2 border-t border-border bg-background/95 px-4 py-3 backdrop-blur">
+      <StickyFooter>
         <Button
-          onClick={onSubmit}
-          disabled={!canSubmit}
+          onClick={onNext}
+          disabled={!canAdvance}
           className="w-full sm:w-auto"
         >
-          Find Stocks
+          Next
           {sectors.length > 0 ? (
             <span className="ml-1 text-xs opacity-70">
               ({sectors.length}/{MAX_SECTORS})
             </span>
           ) : null}
         </Button>
-      </div>
+      </StickyFooter>
     </section>
   );
 }
 
 function Step3({
+  stockTypes,
+  setStockTypes,
+  risk,
+  setRisk,
+  canSubmit,
+  onSubmit,
+}: {
+  stockTypes: StockType[];
+  setStockTypes: (next: StockType[]) => void;
+  risk: RiskTolerance;
+  setRisk: (next: RiskTolerance) => void;
+  canSubmit: boolean;
+  onSubmit: () => void;
+}) {
+  return (
+    <section className="mx-auto flex max-w-4xl flex-col gap-6">
+      <div>
+        <h2 className="mb-1 text-lg font-semibold">Style and risk</h2>
+        <p className="text-sm text-muted-foreground">
+          Tune what kind of stocks you want and how much risk to allow.
+        </p>
+      </div>
+
+      <div className="flex flex-col gap-2">
+        <h3 className="text-sm font-semibold">Stock type</h3>
+        <StockTypeSelector value={stockTypes} onChange={setStockTypes} />
+      </div>
+
+      <div className="flex flex-col gap-2">
+        <h3 className="text-sm font-semibold">Risk tolerance</h3>
+        <RiskToleranceSlider value={risk} onChange={setRisk} />
+      </div>
+
+      <StickyFooter>
+        <Button
+          onClick={onSubmit}
+          disabled={!canSubmit}
+          className="w-full sm:w-auto"
+        >
+          Find Stocks
+        </Button>
+      </StickyFooter>
+    </section>
+  );
+}
+
+function Step4({
   status,
   cards,
   error,
@@ -328,6 +464,9 @@ function Step3({
     );
   }
 
+  // NOTE: The richer scan-progress UI lives in components/picker/scan-progress.tsx,
+  // which is owned by a parallel agent. Until that ships we lean on the
+  // existing grid's loading skeleton — it's a complete fallback, not a stub.
   return (
     <section className="mx-auto max-w-7xl">
       <StockCardGrid
@@ -339,13 +478,41 @@ function Step3({
 }
 
 // ---------------------------------------------------------------------------
-// Step dots — tiny visual indicator. Pure decoration; the real step gate is
-// the back button and Find Stocks button.
+// Shared bits — kept inline to avoid yet another file for tiny presentational
+// wrappers.
 // ---------------------------------------------------------------------------
+
+function StickyFooter({ children }: { children: React.ReactNode }) {
+  return (
+    <div className="sticky bottom-0 -mx-4 mt-2 border-t border-border bg-background/95 px-4 py-3 backdrop-blur">
+      {children}
+    </div>
+  );
+}
+
+function MarketSummary({ sel }: { sel: MarketSelection }) {
+  if (sel.autoPickMarket) {
+    return <span className="font-medium text-foreground">Auto-pick</span>;
+  }
+  if (sel.market) {
+    return <span className="font-medium text-foreground">{sel.market.label}</span>;
+  }
+  if (sel.customCountries.length > 0) {
+    return (
+      <span className="font-medium text-foreground">
+        {sel.customCountries.join(', ')}
+      </span>
+    );
+  }
+  return <span className="font-medium text-foreground">—</span>;
+}
+
+// Step dots — tiny visual indicator. Pure decoration; the real step gate is
+// the back button and the per-step Next/Find Stocks button.
 function StepDots({ step }: { step: Step }) {
   return (
-    <div className="flex items-center gap-1.5" aria-label={`Step ${step} of 3`}>
-      {[1, 2, 3].map((n) => (
+    <div className="flex items-center gap-1.5" aria-label={`Step ${step} of 4`}>
+      {[1, 2, 3, 4].map((n) => (
         <span
           key={n}
           className={cn(

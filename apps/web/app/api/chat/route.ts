@@ -117,26 +117,50 @@ const BodySchema = z.object({
 
 // Research-tab workflow text. Long, so kept out of the request handler.
 // {DB_HINT} placeholder is substituted per-request based on the dbMode flag.
+// HARD RULE: research is INVENTORY-FIRST, not Q&A. Every turn = inventory → gap → upsert → report.
 const RESEARCH_EXTRA_TEMPLATE = `
 
-RESEARCH TAB WORKFLOW:
-  - {DB_HINT}
-  - upsert_event / upsert_future_event / upsert_business_context persist immediately to Postgres. You MUST actually call them — describing them is not enough. Every search_news article with a usable date must be persisted via upsert_event before you write prose.
-  - End every reply with a single marker line, no other text: "[[SAVED:E=4,F=1,C=1]]" (E=events, F=future_events, C=1 if business_context updated else 0). If nothing saved: "[[SAVED:E=0,F=0,C=0]]". The UI renders it as a badge.
-  - Mention the top-right "DB" panel for inspection.
+RESEARCH TAB WORKFLOW — DO NOT answer in Q&A mode. Always: inventory → gap → upsert → report.
+{DB_HINT}
 
-AUTO-SAVE ALGORITHM (every research turn, no permission needed):
-  1. PAST EVENT — upsert_event for any search_news article with non-null published_date that mentions the active stock. Fields: stock_id, event_date=published_date, title (<=120 chars), summary_md (2-4 sentences in your words), source_url, sentiment_label in {bull,bear,neutral}, sentiment_score in [-1,1].
-  2. FUTURE EVENT — upsert_future_event for any dated upcoming catalyst (earnings, FDA, trial, CMD, expiry, regulatory). Fields: expected_date, title, description_md, probability_positive + probability_negative in [0,1] summing <=1 (null if unknown), expected_impact_pct, source_urls.
-  3. BUSINESS CONTEXT — at end of session, call upsert_business_context once per section (summary | timeline | future_outlook) with merged patch_md (<1500 chars each).
-  4. event_date order: (a) explicit date in article body; (b) published_date; (c) today. Never invent dates or URLs — skip and report the gap instead.
-  5. DEDUPE — Research tab cannot call get_events; rely on consolidate_events at the end.
-  6. FINAL STEP — call consolidate_events({stock_id, dry_run:false}) ONCE after upserts; include returned deleted count in the [[SAVED:...]] marker.`;
+PHASE 1 — INVENTORY (mandatory; first action every turn when DB mode is ON):
+  - Call get_business_context(stock_id), get_events(stock_id, limit:50), get_future_events(stock_id) IN PARALLEL.
+  - Open the reply with this exact block (fill from tool results; omit fields with no data):
+    📊 Already in DB for \${symbol}:
+      • Business context: <which of summary / timeline / future_outlook are populated> (updated <relative-age> each, or "missing")
+      • Events: <N> past events (<X> bull, <Y> neutral, <Z> bear). Latest: <YYYY-MM-DD> "<title>" (event #<id>). Top 3-5 relevant titles by recency/sentiment.
+      • Future events: <N> upcoming. Next 3 dated catalysts: <date> "<title>" (probability <p>).
+
+PHASE 2 — GAP IDENTIFICATION:
+  - Compare the user's question (or the implicit "research this stock" intent) against the inventory.
+  - Output a "🎯 Gaps to fill" block listing: drivers not yet covered; past events from last N days missing from DB; forward catalysts within next 90 days not tracked; business_context sections empty or >7 days stale.
+
+PHASE 3 — SEARCH + DEDUPE-AWARE UPSERT:
+  - For each gap, call search_news with a targeted query.
+  - Classify EVERY returned article and act:
+      🆕 NEW       → dated event not in DB → upsert_event
+      ✏️ UPDATE    → matches existing event by (stock_id, event_date, fuzzy title) but article adds richer summary/correction → upsert_event with same date+title (overwrites)
+      ✅ EXISTS    → already in DB, article adds nothing → DO NOT write
+  - Forward catalysts: same logic via upsert_future_event.
+  - Business_context: upsert_business_context only at end of turn, once per section (summary | timeline | future_outlook), patch_md <1500 chars each.
+  - Date order for event_date: (a) explicit date in article body; (b) published_date; (c) today. Never invent dates or URLs.
+
+PHASE 4 — FINAL REPORT (mandatory; replaces the bare marker):
+  📝 This turn:
+    • Saved <E> new events: #<id>-#<id>
+    • Updated <U> existing: #<id> (reason), ...
+    • Skipped <S> already-known articles
+    • Added <F> future catalysts: #f<id> "<title> <date>"
+    • Updated business_context.<section> (if any)
+  [[SAVED:E=<new-events>,F=<new-future>,C=<1-if-context-bumped-else-0>,U=<updates>,S=<skipped>]]
+
+After upserts, call consolidate_events({stock_id, dry_run:false}) ONCE. Mention the top-right "DB" panel for inspection.
+Example upsert_event input: {"stock_id":123,"event_date":"2025-03-14","title":"Q1 beat","summary_md":"...","source_url":"https://...","sentiment_label":"bull","sentiment_score":0.6}`;
 
 const RESEARCH_DB_HINT_ON =
-  'DB MODE ON: you may call get_events, get_business_context, get_future_events, get_prices to consult existing rows and avoid duplicates.';
+  'DB MODE ON: you MUST call get_events, get_business_context, get_future_events FIRST every turn — see PHASE 1.';
 const RESEARCH_DB_HINT_OFF =
-  'DB MODE OFF: DB read tools are not available. Use search_news + reasoning, then write findings via upsert tools.';
+  'DB MODE OFF: skip PHASE 1; go directly to search and upsert. Your replies will not have an inventory block.';
 
 const ANALYSIS_EXTRA = `
 

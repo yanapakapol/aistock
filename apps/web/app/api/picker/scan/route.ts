@@ -1,4 +1,4 @@
-import { NextResponse, type NextRequest } from 'next/server';
+import { type NextRequest, NextResponse } from 'next/server';
 import { z } from 'zod';
 import { generateObject } from 'ai';
 
@@ -58,15 +58,65 @@ const MARKET_EXCHANGES: Record<Market, string[]> = {
   TW: ['TWSE'],
 };
 
+// ---------- Stock types ----------
+
+const STOCK_TYPES = [
+  'growth',
+  'value',
+  'dividend',
+  'garp',
+  'quality',
+  'momentum',
+  'defensive',
+  'cyclical',
+  'small_cap',
+  'mid_cap',
+  'large_cap',
+  'speculative',
+  'income',
+  'turnaround',
+  'emerging_tech',
+  'esg',
+] as const;
+type StockType = (typeof STOCK_TYPES)[number];
+
+const RISK_TOLERANCES = ['low', 'medium', 'high', 'aggressive'] as const;
+type RiskTolerance = (typeof RISK_TOLERANCES)[number];
+
+const RISK_MIN_PROTECTION: Record<RiskTolerance, number> = {
+  low: 70,
+  medium: 40,
+  high: 20,
+  aggressive: 0,
+};
+
 // ---------- Request body ----------
 
-const BodySchema = z.object({
-  market: z.enum(MARKETS),
-  sectors: z.array(z.string().min(1).max(80)).min(1).max(5),
-});
+const BodySchema = z
+  .object({
+    market: z.enum(MARKETS).nullable().optional(),
+    customCountries: z.array(z.string().min(1).max(80)).max(10).optional(),
+    autoPickMarket: z.boolean().optional(),
+    sectors: z.array(z.string().min(1).max(80)).min(1).max(5),
+    stockTypes: z.array(z.enum(STOCK_TYPES)).max(3).optional(),
+    riskTolerance: z.enum(RISK_TOLERANCES).optional(),
+  })
+  .refine(
+    (v) =>
+      (v.market !== null && v.market !== undefined) ||
+      (v.customCountries && v.customCountries.length > 0) ||
+      v.autoPickMarket === true,
+    {
+      message:
+        'one of `market`, `customCountries`, or `autoPickMarket` must be provided',
+      path: ['market'],
+    },
+  );
 
 // ---------- Response schema (drives generateObject) ----------
 
+// Source-URL refinement happens at generate-time once we know the article
+// list; the base schema enforces shape + boundaries.
 const StockCardSchema = z.object({
   symbol: z.string().min(1).max(20).describe('Ticker symbol as it trades on the requested market.'),
   exchange: z.string().min(1).max(20).describe('Exchange code — must belong to the requested market.'),
@@ -101,25 +151,29 @@ const StockCardSchema = z.object({
     .describe('Earnings, product launches, regulatory decisions, expirations, etc.'),
   boomProbability: z
     .number()
+    .int()
     .min(0)
     .max(100)
-    .describe('Best-effort estimate, 0-100, that the stock pops meaningfully in the next ~3 months.'),
+    .describe(
+      'Calibrated 0-100 estimate. Most picks should land 30-60. Reserve >75 for stocks with multiple imminent catalysts AND strong evidence.',
+    ),
   boomTriggers: z
     .array(z.string().min(5).max(200))
     .min(1)
     .max(6)
-    .describe('Concrete catalysts that could drive the move.'),
+    .describe('Concrete catalysts that could drive the move — each must be supported by a cited article.'),
   riskProtection: z
     .number()
+    .int()
     .min(0)
     .max(100)
-    .describe('Higher = safer. 100 = bulletproof balance sheet, 0 = high blow-up risk.'),
-  riskWhy: z.string().min(20).max(400).describe('Brief explanation of the risk score.'),
+    .describe('Higher = SAFER. 80-100 large-cap blue-chip, 60-79 mid-cap, 40-59 small-cap profitable, 20-39 fragile, 0-19 distressed.'),
+  riskWhy: z.string().min(20).max(400).describe('Brief explanation of the risk score, anchored in evidence.'),
   consensus: z
     .string()
     .min(5)
     .max(200)
-    .describe('Analyst consensus, e.g. "8 Buy / 3 Hold / 1 Sell, avg target $185". "n/a" if unknown.'),
+    .describe('Analyst consensus, e.g. "8 Buy / 3 Hold / 1 Sell, avg target $185". Use "n/a" if not in sources.'),
   sources: z
     .array(z.string().url())
     .min(1)
@@ -127,8 +181,11 @@ const StockCardSchema = z.object({
     .describe('1-3 URLs from the provided article list that back this card.'),
 });
 
+type StockCard = z.infer<typeof StockCardSchema>;
+
 const ResultSchema = z.object({
-  cards: z.array(StockCardSchema).length(6),
+  // We ask for 6 but allow fewer for strict-risk filters that can't fill them.
+  cards: z.array(StockCardSchema).min(1).max(6),
 });
 
 // ---------- Tavily query builder ----------
@@ -157,38 +214,35 @@ interface Article {
   publishedDate?: string;
 }
 
-async function fanoutTavily(queries: string[], apiKey: string): Promise<Article[]> {
-  // We have a Tavily key, but the helper resolves its own key from the vault.
-  // The helper supports per-call overrides only via env, so we just call it
-  // and let it re-resolve — adds one cache-hit DB round-trip per query, which
-  // is negligible compared to Tavily latency.
-  void apiKey; // intentionally unused; helper loads its own key
-  const settled = await Promise.allSettled(
-    queries.map(async (q) => {
-      try {
-        const res = await searchNewsViaTavily(q, {
-          topic: 'news',
-          searchDepth: 'advanced',
-          maxResults: 6,
-          days: 60,
-        });
-        return res.results.map(
-          (r: TavilyResult): Article => ({
-            url: r.url,
-            title: r.title,
-            content: (r.content ?? '').slice(0, 600),
-            publishedDate: r.publishedDate,
-          }),
-        );
-      } catch (err) {
-        console.error('[picker/scan] tavily query failed:', q, sanitizeError(err));
-        return [] as Article[];
-      }
-    }),
-  );
-  const out: Article[] = [];
-  for (const s of settled) if (s.status === 'fulfilled') out.push(...s.value);
-  return out;
+interface QueryFanoutResult {
+  query: string;
+  ok: boolean;
+  count: number;
+}
+
+async function runOneTavily(
+  q: string,
+): Promise<{ articles: Article[]; ok: boolean }> {
+  try {
+    const res = await searchNewsViaTavily(q, {
+      topic: 'news',
+      searchDepth: 'advanced',
+      maxResults: 6,
+      days: 60,
+    });
+    const articles = res.results.map(
+      (r: TavilyResult): Article => ({
+        url: r.url,
+        title: r.title,
+        content: (r.content ?? '').slice(0, 600),
+        publishedDate: r.publishedDate,
+      }),
+    );
+    return { articles, ok: true };
+  } catch (err) {
+    console.error('[picker/scan] tavily query failed:', q, sanitizeError(err));
+    return { articles: [], ok: false };
+  }
 }
 
 function dedupeByUrl(articles: Article[], cap: number): Article[] {
@@ -237,12 +291,122 @@ async function recordAudit(
   }
 }
 
+// ---------- SSE helpers ----------
+
+type SseEventName = 'phase' | 'result' | 'error';
+
+function sseFormat(event: SseEventName, data: unknown): string {
+  return `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+}
+
+function sseDone(): string {
+  // Terminator the client uses to know the stream is intentionally closed.
+  return `data: ${JSON.stringify({ done: true })}\n\n`;
+}
+
+interface SseEmitter {
+  phase: (
+    name: string,
+    detail: string,
+    extra?: Record<string, unknown>,
+  ) => void;
+  result: (data: unknown) => void;
+  error: (message: string, phase: string, kind: string) => void;
+  end: () => void;
+}
+
+// ---------- Auto-pick market ----------
+
+interface AutoMarketPick {
+  markets: string[];
+  reasoning?: string;
+}
+
+const AutoMarketSchema = z.object({
+  markets: z
+    .array(z.string().min(1).max(40))
+    .min(1)
+    .max(3)
+    .describe(
+      'Market codes (US, HK, CN, TH, JP, KR, UK, DE, FR, TW) or country names like "India", "Singapore".',
+    ),
+  reasoning: z.string().min(10).max(400).describe('Brief macro/sector rationale.'),
+});
+
+async function autoPickMarkets(
+  keyByProvider: Record<Provider, string | null>,
+): Promise<AutoMarketPick | null> {
+  for (const attempt of PROVIDER_CHAIN) {
+    const key = keyByProvider[attempt.provider];
+    if (!key) continue;
+    const t0 = Date.now();
+    try {
+      const model = await clientFor(attempt.provider, attempt.modelId, key);
+      const { object } = await generateObject({
+        model,
+        schema: AutoMarketSchema,
+        system:
+          'You are a global macro strategist. Reply ONLY with the requested JSON shape. Be specific and concise.',
+        prompt:
+          'Given current 2026 macro conditions, which 2 stock markets globally are most likely to see broad-based booms in the next 6 months? ' +
+          'Reply with a JSON array of market codes (US, HK, CN, TH, JP, KR, UK, DE, FR, TW, or country names like "India", "Singapore"). ' +
+          'Be specific and cite reasoning briefly.',
+      });
+      recordAudit(
+        `picker.scan.auto.${attempt.provider}`,
+        PROVIDER_HOST[attempt.provider],
+        200,
+        Date.now() - t0,
+      ).catch(() => undefined);
+      return object;
+    } catch (err) {
+      const status =
+        (err as { status?: number; statusCode?: number })?.status ??
+        (err as { statusCode?: number })?.statusCode ??
+        500;
+      recordAudit(
+        `picker.scan.auto.${attempt.provider}`,
+        PROVIDER_HOST[attempt.provider],
+        status,
+        Date.now() - t0,
+      ).catch(() => undefined);
+      console.error(
+        `[picker/scan] auto-pick ${attempt.provider} failed:`,
+        sanitizeError(err),
+      );
+      continue;
+    }
+  }
+  return null;
+}
+
+// Map a free-form market string (from autoPickMarkets or customCountries)
+// to a (label, allowedExchanges) tuple. Unknown country names get a
+// generic label and an empty exchange whitelist — the LLM is instructed
+// to use major listed exchanges in that country.
+function resolveMarketLabel(input: string): {
+  label: string;
+  exchanges: string[];
+} {
+  const norm = input.trim();
+  const upper = norm.toUpperCase();
+  if ((MARKETS as readonly string[]).includes(upper)) {
+    const m = upper as Market;
+    return { label: MARKET_LABEL[m], exchanges: MARKET_EXCHANGES[m] };
+  }
+  return { label: norm, exchanges: [] };
+}
+
 // ---------- Handler ----------
 
 export async function POST(req: NextRequest) {
+  // Phase is tracked outside the stream so the top-level catch can report it.
   let phase = 'init';
+
+  // ---- Pre-stream gates: auth + same-origin + body parse ----
+  // These return classic JSON 4xx so the client knows to surface a toast
+  // rather than try to parse an SSE stream.
   try {
-    // CSRF: same-origin only.
     const sfs = req.headers.get('sec-fetch-site');
     if (sfs && sfs !== 'same-origin' && sfs !== 'none') {
       return NextResponse.json({ error: 'cross-site blocked' }, { status: 403 });
@@ -263,87 +427,257 @@ export async function POST(req: NextRequest) {
         { status: 400 },
       );
     }
-    const { market, sectors } = parsed.data;
-    const marketLabel = MARKET_LABEL[market];
-    const allowedExchanges = MARKET_EXCHANGES[market];
+    const body = parsed.data;
+    const sectors = body.sectors;
+    const stockTypes: StockType[] = body.stockTypes ?? [];
+    const riskTolerance: RiskTolerance = body.riskTolerance ?? 'medium';
+
+    // ---- Build the SSE stream ----
+    const encoder = new TextEncoder();
+    const stream = new ReadableStream<Uint8Array>({
+      async start(controller) {
+        let closed = false;
+        const send = (chunk: string) => {
+          if (closed) return;
+          try {
+            controller.enqueue(encoder.encode(chunk));
+          } catch {
+            /* controller already torn down */
+          }
+        };
+        const emitter: SseEmitter = {
+          phase: (name, detail, extra) =>
+            send(sseFormat('phase', { name, detail, ...(extra ?? {}) })),
+          result: (data) => send(sseFormat('result', data)),
+          error: (message, errPhase, kind) =>
+            send(sseFormat('error', { message, phase: errPhase, kind })),
+          end: () => {
+            if (closed) return;
+            send(sseDone());
+            closed = true;
+            try {
+              controller.close();
+            } catch {
+              /* ignore */
+            }
+          },
+        };
+
+        try {
+          await runScan({ body, sectors, stockTypes, riskTolerance, emitter });
+        } catch (err) {
+          const msg =
+            err instanceof Error
+              ? err.message || err.name || 'unknown error'
+              : typeof err === 'string'
+                ? err
+                : 'unknown error';
+          console.error(`[picker/scan] uncaught in phase=${phase}: ${msg}`);
+          emitter.error(msg, phase, 'server_exception');
+        } finally {
+          emitter.end();
+        }
+      },
+      cancel() {
+        // Client disconnected — nothing to clean up; in-flight fetches will
+        // be torn down by GC when the controller is no longer referenced.
+      },
+    });
+
+    return new Response(stream, {
+      status: 200,
+      headers: {
+        'content-type': 'text/event-stream; charset=utf-8',
+        'cache-control': 'no-cache, no-transform',
+        connection: 'keep-alive',
+        // Disable proxy buffering (Nginx etc.) so events flush immediately.
+        'x-accel-buffering': 'no',
+      },
+    });
+  } catch (err) {
+    // Top-level pre-stream backstop (e.g. body parser exploded). Always emits
+    // a non-empty JSON body so the UI can render an actionable message.
+    let message = 'unknown error';
+    if (err instanceof Error) message = err.message || err.name || 'unknown error';
+    else if (typeof err === 'string') message = err;
+    console.error(`[picker/scan] uncaught pre-stream in phase=${phase}: ${message}`);
+    return new NextResponse(
+      JSON.stringify({ error: message, phase, kind: 'server_exception' }),
+      {
+        status: 500,
+        headers: { 'content-type': 'application/json; charset=utf-8' },
+      },
+    );
+  }
+
+  // ---- Inner async pipeline (closure over phase via parameter) ----
+  async function runScan(params: {
+    body: z.infer<typeof BodySchema>;
+    sectors: string[];
+    stockTypes: StockType[];
+    riskTolerance: RiskTolerance;
+    emitter: SseEmitter;
+  }): Promise<void> {
+    const { body, sectors, stockTypes, riskTolerance, emitter } = params;
 
     // ---- Discover provider keys in parallel (LLMs + news) ----
     phase = 'discover-keys';
-    const [mistralKey, openaiKey, anthropicKey, tavilyKey, newsProviderKeys] = await Promise.all([
-      loadApiKey('mistral').catch(() => null),
-      loadApiKey('openai').catch(() => null),
-      loadApiKey('anthropic').catch(() => null),
-      loadNewsKey('tavily').catch(() => null),
-      // Probe every news provider so we can fall back to ANY configured one.
-      Promise.all(
-        NEWS_PROVIDERS.map(async (p) => ({
-          p,
-          key: await loadNewsKey(p).catch(() => null),
-        })),
-      ),
-    ]);
+    emitter.phase('discover-keys', 'Loading API keys from the encrypted vault...');
+    const [mistralKey, openaiKey, anthropicKey, tavilyKey, newsProviderKeys] =
+      await Promise.all([
+        loadApiKey('mistral').catch(() => null),
+        loadApiKey('openai').catch(() => null),
+        loadApiKey('anthropic').catch(() => null),
+        loadNewsKey('tavily').catch(() => null),
+        Promise.all(
+          NEWS_PROVIDERS.map(async (p) => ({
+            p,
+            key: await loadNewsKey(p).catch(() => null),
+          })),
+        ),
+      ]);
 
     const keyByProvider: Record<Provider, string | null> = {
       mistral: mistralKey,
       openai: openaiKey,
       anthropic: anthropicKey,
-      // Not in the chain — declared for type completeness.
       google: null,
       moonshot: null,
       deepseek: null,
     };
 
-    // ---- Web search fan-out ----
-    phase = 'tavily-search';
-    const queries = buildQueries(marketLabel, sectors);
-    let articles: Article[] = [];
+    // ---- Resolve target markets ----
+    phase = 'resolve-markets';
+    const targets: Array<{ label: string; exchanges: string[] }> = [];
 
-    if (tavilyKey || process.env.TAVILY_API_KEY) {
-      const tStart = Date.now();
-      const raw = await fanoutTavily(queries, tavilyKey ?? process.env.TAVILY_API_KEY ?? '');
-      articles = dedupeByUrl(raw, 20);
-      recordAudit(
-        'picker.scan.tavily',
-        'api.tavily.com',
-        articles.length > 0 ? 200 : 204,
-        Date.now() - tStart,
-      ).catch(() => undefined);
-    } else {
-      // Tavily not configured — surface which news provider IS configured so
-      // the caller knows what to do. (Other providers in this vault are
-      // ticker-scoped — Finnhub / EODHD — and not useful for an open
-      // "find me 6 stocks" web search. So we hard-fail here rather than
-      // silently produce hallucinated cards.)
-      const configured = newsProviderKeys.filter((x) => x.key).map((x) => x.p);
-      return NextResponse.json(
-        {
-          error:
-            'No web-search provider configured. Add a Tavily key in Settings → News & data API keys. ' +
-            (configured.length
-              ? `(Configured: ${configured.join(', ')} — these are ticker-scoped, not open web search.)`
-              : ''),
-          phase: 'tavily-search',
-          kind: 'no_search_key',
-        },
-        { status: 400 },
+    if (body.autoPickMarket) {
+      emitter.phase(
+        'resolve-markets',
+        'Asking the AI to pick the most likely booming markets...',
+      );
+      const picked = await autoPickMarkets(keyByProvider);
+      if (!picked || picked.markets.length === 0) {
+        // Soft-fail to whatever explicit market was provided, else US.
+        const fallback =
+          body.market ?? (body.customCountries?.[0] as string | undefined) ?? 'US';
+        const resolved = resolveMarketLabel(fallback);
+        targets.push(resolved);
+        emitter.phase(
+          'resolve-markets',
+          `Auto-pick unavailable; falling back to ${resolved.label}.`,
+          { markets: [resolved.label], autoPicked: false },
+        );
+      } else {
+        for (const m of picked.markets.slice(0, 2)) {
+          targets.push(resolveMarketLabel(m));
+        }
+        emitter.phase(
+          'resolve-markets',
+          `AI picked: ${targets.map((t) => t.label).join(', ')}.`,
+          {
+            markets: targets.map((t) => t.label),
+            autoPicked: true,
+            reasoning: picked.reasoning,
+          },
+        );
+      }
+    } else if (body.customCountries && body.customCountries.length > 0) {
+      for (const c of body.customCountries.slice(0, 3)) {
+        targets.push(resolveMarketLabel(c));
+      }
+      emitter.phase(
+        'resolve-markets',
+        `Scanning ${targets.map((t) => t.label).join(', ')}.`,
+        { markets: targets.map((t) => t.label) },
+      );
+    } else if (body.market) {
+      targets.push(resolveMarketLabel(body.market));
+      emitter.phase(
+        'resolve-markets',
+        `Scanning ${targets[0]!.label}.`,
+        { markets: [targets[0]!.label] },
       );
     }
 
-    if (articles.length === 0) {
-      return NextResponse.json(
-        {
-          error:
-            'Web search returned no usable articles for this market+sector combination. Try broader sectors or a different market.',
-          phase: 'tavily-search',
-          kind: 'no_articles',
-        },
-        { status: 502 },
+    if (targets.length === 0) {
+      emitter.error(
+        'No market resolved. Pick a market, enter a country, or enable auto-pick.',
+        'resolve-markets',
+        'no_market',
       );
+      return;
+    }
+
+    const primaryMarketLabel = targets.map((t) => t.label).join(' / ');
+    const allowedExchanges = Array.from(
+      new Set(targets.flatMap((t) => t.exchanges)),
+    );
+
+    // ---- Web search fan-out ----
+    phase = 'tavily-search';
+    const haveTavily = !!(tavilyKey || process.env.TAVILY_API_KEY);
+    if (!haveTavily) {
+      const configured = newsProviderKeys.filter((x) => x.key).map((x) => x.p);
+      emitter.error(
+        'No web-search provider configured. Add a Tavily key in Settings → News & data API keys. ' +
+          (configured.length
+            ? `(Configured: ${configured.join(', ')} — these are ticker-scoped, not open web search.)`
+            : ''),
+        'tavily-search',
+        'no_search_key',
+      );
+      return;
+    }
+
+    // For multi-market targets, we still only fan out one query set against
+    // a synthesized label — keeps Tavily cost bounded at 4-6 queries total.
+    const queries = buildQueries(primaryMarketLabel, sectors);
+    emitter.phase(
+      'search',
+      `Running ${queries.length} web searches via Tavily...`,
+      { totalQueries: queries.length },
+    );
+
+    const articles: Article[] = [];
+    const queryResults: QueryFanoutResult[] = [];
+    const tStart = Date.now();
+    for (let i = 0; i < queries.length; i++) {
+      const q = queries[i]!;
+      emitter.phase('search', `Tavily: ${q}`, {
+        query: i + 1,
+        of: queries.length,
+        q,
+      });
+      const { articles: got, ok } = await runOneTavily(q);
+      articles.push(...got);
+      queryResults.push({ query: q, ok, count: got.length });
+    }
+    const deduped = dedupeByUrl(articles, 20);
+    recordAudit(
+      'picker.scan.tavily',
+      'api.tavily.com',
+      deduped.length > 0 ? 200 : 204,
+      Date.now() - tStart,
+    ).catch(() => undefined);
+
+    emitter.phase(
+      'sources',
+      `${deduped.length} unique articles aggregated`,
+      { count: deduped.length, queries: queryResults },
+    );
+
+    if (deduped.length === 0) {
+      emitter.error(
+        'Web search returned no usable articles for this market+sector combination. Try broader sectors or a different market.',
+        'tavily-search',
+        'no_articles',
+      );
+      return;
     }
 
     // ---- Build prompt ----
     phase = 'build-prompt';
-    const articleBlock = articles
+    const articleBlock = deduped
       .map(
         (a, i) =>
           `[#${i + 1}] ${a.title}\n  URL: ${a.url}\n  ${
@@ -352,34 +686,75 @@ export async function POST(req: NextRequest) {
       )
       .join('\n\n');
 
+    const stockTypesStr = stockTypes.length > 0 ? stockTypes.join(', ') : 'any';
+    const minRiskProtection = RISK_MIN_PROTECTION[riskTolerance];
+
     const systemPrompt =
-      'You are a sell-side equity scout assembling AI-curated stock cards for the aistock platform. ' +
-      'You produce EXACTLY 6 cards, each tradeable on the requested market. ' +
-      `For ${market}, only use exchanges from this list: ${allowedExchanges.join(', ')}. ` +
-      'Hard rules: (1) NEVER fabricate ticker symbols — every symbol must correspond to a real, currently-listed company on one of those exchanges. ' +
-      'If in doubt about a ticker, pick a different stock you are sure about. ' +
-      '(2) Every card must cite 1-3 source URLs from the supplied article list — sources field must use ONLY URLs that appear in the Articles block. ' +
-      '(3) boomProbability and riskProtection are 0-100 estimates; be explicit about uncertainty in the rationale fields. ' +
-      '(4) If an article does not mention a stock, do not pretend it does — only cite articles that genuinely support the card. ' +
-      '(5) Diversify across the requested sectors when there are multiple. ' +
-      '(6) industryContext is ~50 words; financialStatus is 1-2 sentences. ' +
-      '(7) consensus may be "n/a — no analyst data in sources" if the articles do not provide it; do not invent target prices.';
+      `You are a SKEPTICAL stock analyst. You produce up to 6 well-evidenced candidates. RULES:\n\n` +
+      `1. EVIDENCE > NARRATIVE. Every claim MUST trace back to one of the articles ` +
+      `you were given. If an article doesn't support a claim, do NOT make it.\n` +
+      `2. Boom probability is a CALIBRATED estimate, not marketing copy. Most ` +
+      `stocks should be in the 30-60% range. Reserve >75% for stocks with ` +
+      `multiple imminent (next 30 days) catalysts AND strong supporting ` +
+      `evidence. Reserve <30% for stocks where you found mostly negative or ` +
+      `no-signal news.\n` +
+      `3. Risk protection is HIGHER = SAFER. Calibrate:\n` +
+      `   - 80-100: large-cap blue-chip with diversified revenue, low debt, profitable\n` +
+      `   - 60-79: mid-cap with positive cash flow but some concentration risk\n` +
+      `   - 40-59: small-cap profitable OR mid-cap unprofitable\n` +
+      `   - 20-39: small-cap unprofitable, high beta, single-product, or recent dilution\n` +
+      `   - 0-19: pre-revenue, distressed balance sheet, or major litigation\n` +
+      `4. Risk tolerance ${riskTolerance} adjusts the FILTER, not the rating:\n` +
+      `   - low: only suggest stocks with risk_protection >= 70 (or you can't fill all 6 — emit fewer)\n` +
+      `   - medium: risk_protection >= 40\n` +
+      `   - high: risk_protection >= 20\n` +
+      `   - aggressive: no minimum; explicitly include 1-2 speculative high-upside picks\n` +
+      `   For this run, every card you emit MUST have risk_protection >= ${minRiskProtection}. ` +
+      `If you cannot find 6 such stocks in the supplied articles, emit fewer — never pad.\n` +
+      `5. Stock types ${stockTypesStr} filter: each card must have an ` +
+      `\`industry\` and \`name\` that plausibly fits one of these types. If none ` +
+      `listed, optimize for the user's risk tolerance.\n` +
+      `6. Each card's \`sources\` array must contain 1-3 ACTUAL URLs from the input ` +
+      `article list. Never invent URLs.\n` +
+      `7. NEVER fabricate ticker symbols. If you're unsure about a ticker, drop the ` +
+      `stock and surface a different one.\n\n` +
+      `Target market(s): ${primaryMarketLabel}.\n` +
+      (allowedExchanges.length > 0
+        ? `Allowed exchanges: ${allowedExchanges.join(', ')}. Every \`exchange\` field must come from this list.\n`
+        : `Use the major listed exchanges in the target country (verify the ticker actually trades there).\n`);
 
     const userPrompt =
-      `Market: ${marketLabel}\n` +
-      `Allowed exchanges: ${allowedExchanges.join(', ')}\n` +
-      `Sectors of interest: ${sectors.join(', ')}\n\n` +
+      `Market(s): ${primaryMarketLabel}\n` +
+      (allowedExchanges.length > 0
+        ? `Allowed exchanges: ${allowedExchanges.join(', ')}\n`
+        : '') +
+      `Sectors of interest: ${sectors.join(', ')}\n` +
+      `Stock-type filters: ${stockTypesStr}\n` +
+      `Risk tolerance: ${riskTolerance} (minimum risk_protection ${minRiskProtection})\n\n` +
       `Articles consulted (cite by URL — these are the ONLY URLs you may put in the per-card sources arrays):\n\n${articleBlock}\n\n` +
-      'Produce exactly 6 stock cards. Diversify across sectors when multiple were requested. Anchor every claim to the article list above.';
+      `Produce up to 6 stock cards. Diversify across sectors when multiple were requested. Anchor every claim to the article list above. ` +
+      `Emit fewer cards if the evidence or risk filter doesn't justify 6.`;
 
     // ---- generateObject with provider fallback ----
     phase = 'llm';
+    emitter.phase(
+      'llm',
+      `Analyzing ${deduped.length} articles and ranking up to 6 stocks...`,
+      { articleCount: deduped.length },
+    );
+
+    const articleUrlSet = new Set(deduped.map((a) => a.url.toLowerCase()));
     let lastErr: unknown = null;
-    let lastStatus = 500;
 
     for (const attempt of PROVIDER_CHAIN) {
       const key = keyByProvider[attempt.provider];
       if (!key) continue;
+
+      emitter.phase(
+        'llm',
+        `Trying ${attempt.provider} (${attempt.modelId})...`,
+        { provider: attempt.provider, model: attempt.modelId },
+      );
 
       const llmStart = Date.now();
       try {
@@ -398,15 +773,48 @@ export async function POST(req: NextRequest) {
           Date.now() - llmStart,
         ).catch(() => undefined);
 
-        const sources = Array.from(new Set(articles.map((a) => a.url))).slice(0, 20);
-        return NextResponse.json({ cards: object.cards, sources }, { status: 200 });
+        // ---- Post-LLM validation: URLs must be from the article set,
+        //      risk_protection must clear the tolerance floor. ----
+        const filtered: StockCard[] = [];
+        for (const card of object.cards) {
+          // Sources must all be from the article set (case-insensitive).
+          const cleanSources = card.sources.filter((u) =>
+            articleUrlSet.has(u.toLowerCase()),
+          );
+          if (cleanSources.length === 0) {
+            // Model hallucinated all URLs — drop this card.
+            console.warn(
+              `[picker/scan] dropping ${card.symbol}: all sources outside article list`,
+            );
+            continue;
+          }
+          if (card.riskProtection < minRiskProtection) {
+            // Honour the risk-tolerance floor even if the model didn't.
+            continue;
+          }
+          filtered.push({ ...card, sources: cleanSources });
+        }
+
+        if (filtered.length === 0) {
+          // The model returned cards but every one was rejected — surface as
+          // an error so the UI shows something actionable rather than empty.
+          emitter.error(
+            'The model returned cards but none passed evidence + risk-tolerance filters. Try a broader risk tolerance or different sectors.',
+            'llm',
+            'all_cards_filtered',
+          );
+          return;
+        }
+
+        const sources = Array.from(new Set(deduped.map((a) => a.url))).slice(0, 20);
+        emitter.result({ cards: filtered, sources });
+        return;
       } catch (err) {
         const status =
           (err as { status?: number; statusCode?: number })?.status ??
           (err as { statusCode?: number })?.statusCode ??
           500;
         lastErr = err;
-        lastStatus = status;
         recordAudit(
           `picker.scan.${attempt.provider}`,
           PROVIDER_HOST[attempt.provider],
@@ -417,51 +825,24 @@ export async function POST(req: NextRequest) {
           `[picker/scan] ${attempt.provider}/${attempt.modelId} failed:`,
           sanitizeError(err),
         );
-        // Try next provider in chain.
+        emitter.phase(
+          'llm',
+          `${attempt.provider} failed (HTTP ${status}); trying next provider...`,
+          { provider: attempt.provider, status },
+        );
         continue;
       }
     }
 
     // No provider had a key OR every attempt threw.
     if (!lastErr) {
-      return NextResponse.json(
-        {
-          error:
-            'No LLM key configured. Add a Mistral, OpenAI, or Anthropic key in Settings → LLM API keys.',
-          phase: 'llm',
-          kind: 'no_llm_key',
-        },
-        { status: 400 },
+      emitter.error(
+        'No LLM key configured. Add a Mistral, OpenAI, or Anthropic key in Settings → LLM API keys.',
+        'llm',
+        'no_llm_key',
       );
+      return;
     }
-    return NextResponse.json(
-      {
-        error: sanitizeError(lastErr),
-        phase: 'llm',
-        kind: 'llm_failed',
-      },
-      { status: lastStatus || 502 },
-    );
-  } catch (err) {
-    // Top-level backstop. Always emits a non-empty JSON body so the UI agent
-    // can render an actionable message instead of a bare "500".
-    let message = 'unknown error';
-    if (err instanceof Error) message = err.message || err.name || 'unknown error';
-    else if (typeof err === 'string') message = err;
-    else if (err && typeof err === 'object') {
-      try {
-        message = String((err as { message?: unknown }).message ?? JSON.stringify(err));
-      } catch {
-        /* keep default */
-      }
-    }
-    console.error(`[picker/scan] uncaught in phase=${phase}: ${message}`);
-    return new NextResponse(
-      JSON.stringify({ error: message, phase, kind: 'server_exception' }),
-      {
-        status: 500,
-        headers: { 'content-type': 'application/json; charset=utf-8' },
-      },
-    );
+    emitter.error(sanitizeError(lastErr).message, 'llm', 'llm_failed');
   }
 }

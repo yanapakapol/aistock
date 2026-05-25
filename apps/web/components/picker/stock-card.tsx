@@ -114,7 +114,9 @@ export function StockCardView({ card }: Props) {
       )}
     >
       <div className="flex-1 overflow-y-auto p-4">
-        {/* Header — ticker + name + market chip. */}
+        {/* Header — ticker + name + market chip + evidence chip.
+            The evidence chip is the critical-mode sanity check on the LLM:
+            zero sources is a red flag, low source count gets a soft warn. */}
         <header className="flex items-start justify-between gap-2">
           <div className="min-w-0">
             <h3 className="truncate text-xl font-bold leading-tight">
@@ -126,10 +128,21 @@ export function StockCardView({ card }: Props) {
                 {card.industry}
               </p>
             ) : null}
+            {isWeakEvidence(card) ? (
+              <span
+                className="mt-1.5 inline-flex items-center gap-1 rounded-full border border-amber-500/40 bg-amber-500/10 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-amber-400"
+                title="The LLM gave a strong rating with little supporting evidence — verify before trusting."
+              >
+                🧐 Weak evidence
+              </span>
+            ) : null}
           </div>
-          <span className="shrink-0 rounded-full border border-border bg-accent px-2 py-0.5 text-[10px] uppercase tracking-wide">
-            {card.exchange}
-          </span>
+          <div className="flex shrink-0 flex-col items-end gap-1">
+            <span className="rounded-full border border-border bg-accent px-2 py-0.5 text-[10px] uppercase tracking-wide">
+              {card.exchange}
+            </span>
+            <EvidenceChip count={card.sources?.length ?? 0} />
+          </div>
         </header>
 
         {/* Price row — only renders when the API actually sent a number.
@@ -190,37 +203,30 @@ export function StockCardView({ card }: Props) {
           </Section>
         ) : null}
 
-        {/* Boom probability */}
+        {/* Boom probability — critical-mode bands. The label calls the rating
+            what it is so the user can't miss a 90% "verify" warning. */}
         <Section
           title="Boom probability"
           icon={<TrendingUp className="h-3.5 w-3.5" />}
         >
-          <Bar
-            value={clamp01(card.boomProbability)}
-            tone="boom"
-            label={`${Math.round(clamp01(card.boomProbability))}%`}
-          />
+          <CriticalBar kind="boom" value={clamp01(card.boomProbability)} />
           {card.boomTriggers && card.boomTriggers.length > 0 ? (
-            <ul className="mt-2 list-disc space-y-0.5 pl-5 text-xs text-muted-foreground">
-              {card.boomTriggers.map((t, i) => (
-                <li key={i}>{t}</li>
-              ))}
-            </ul>
+            <p className="mt-2 text-xs italic leading-relaxed text-muted-foreground">
+              {card.boomTriggers.join(' · ')}
+            </p>
           ) : null}
         </Section>
 
-        {/* Risk protection */}
+        {/* Risk protection — same banded treatment. Higher = safer. */}
         <Section
           title="Risk protection"
           icon={<ShieldCheck className="h-3.5 w-3.5" />}
         >
-          <Bar
-            value={clamp01(card.riskProtection)}
-            tone="risk"
-            label={`${Math.round(clamp01(card.riskProtection))}%`}
-          />
+          <CriticalBar kind="risk" value={clamp01(card.riskProtection)} />
           {card.riskWhy ? (
-            <p className="mt-2 text-xs text-muted-foreground">{card.riskWhy}</p>
+            <p className="mt-2 text-xs italic leading-relaxed text-muted-foreground">
+              {card.riskWhy}
+            </p>
           ) : null}
         </Section>
 
@@ -358,38 +364,98 @@ function PerformanceLine({ perf }: { perf: StockCard['performance'] }) {
   );
 }
 
-function Bar({
+// ---------------------------------------------------------------------------
+// Critical-mode bars + evidence chip. The picker is now stricter about its
+// own ratings — these helpers translate raw 0-100 numbers into human-legible
+// risk language so the user can spot over-confident calls at a glance.
+// ---------------------------------------------------------------------------
+
+// Color bands for the boom-probability bar.
+// Thresholds are inclusive on the upper end (matches the "0-30 / 31-60 /
+// 61-80 / 81-100" spec). A 100 lands in the gold "verify" band so the LLM
+// pegging the meter is treated as suspicious, not as a buy signal.
+function boomBand(v: number): { fill: string; text: string; label: string } {
+  if (v <= 30) return { fill: 'bg-red-500', text: 'text-red-400', label: 'low conviction' };
+  if (v <= 60) return { fill: 'bg-amber-500', text: 'text-amber-400', label: 'moderate' };
+  if (v <= 80) return { fill: 'bg-green-500', text: 'text-green-400', label: 'high conviction' };
+  return { fill: 'bg-yellow-500', text: 'text-yellow-400', label: 'very high — verify' };
+}
+
+// Color bands for the risk-protection bar (higher = safer).
+function riskBand(v: number): { fill: string; text: string; label: string } {
+  if (v <= 40) return { fill: 'bg-red-500', text: 'text-red-400', label: '🔴 high risk' };
+  if (v <= 70) return { fill: 'bg-amber-500', text: 'text-amber-400', label: '🟡 moderate risk' };
+  return { fill: 'bg-green-500', text: 'text-green-400', label: '🟢 low risk' };
+}
+
+function CriticalBar({
+  kind,
   value,
-  tone,
-  label,
 }: {
+  kind: 'boom' | 'risk';
   value: number; // 0-100, already clamped
-  tone: 'boom' | 'risk';
-  label: string;
 }) {
-  // Boom = green for high; Risk = green for high (higher protection = safer)
-  // so both tones happen to map "high = green" today. We keep the prop so
-  // future re-orientations are a one-line change.
-  const fill = tone === 'boom' ? 'bg-green-500' : 'bg-emerald-500';
+  const band = kind === 'boom' ? boomBand(value) : riskBand(value);
   return (
-    <div className="flex items-center gap-2">
-      <div
-        className="h-2 flex-1 overflow-hidden rounded-full bg-accent"
-        role="progressbar"
-        aria-valuenow={value}
-        aria-valuemin={0}
-        aria-valuemax={100}
-      >
+    <div className="flex flex-col gap-1">
+      <div className="flex items-center gap-2">
         <div
-          className={cn('h-full transition-[width]', fill)}
-          style={{ width: `${value}%` }}
-        />
+          className="h-2 flex-1 overflow-hidden rounded-full bg-accent"
+          role="progressbar"
+          aria-valuenow={value}
+          aria-valuemin={0}
+          aria-valuemax={100}
+        >
+          <div
+            className={cn('h-full transition-[width] duration-300', band.fill)}
+            style={{ width: `${value}%` }}
+          />
+        </div>
+        <span className="w-10 text-right text-xs tabular-nums text-muted-foreground">
+          {Math.round(value)}%
+        </span>
       </div>
-      <span className="w-10 text-right text-xs tabular-nums text-muted-foreground">
-        {label}
+      <span className={cn('text-[11px] font-medium uppercase tracking-wide', band.text)}>
+        {band.label}
       </span>
     </div>
   );
+}
+
+// Source-count chip rendered top-right of the card. Zero sources is a hard
+// red flag — the LLM is supposed to cite evidence; the absence usually means
+// either a parsing failure upstream or a hallucinated pick.
+function EvidenceChip({ count }: { count: number }) {
+  if (count === 0) {
+    return (
+      <span
+        className="inline-flex items-center gap-1 rounded-full border border-red-500/40 bg-red-500/10 px-2 py-0.5 text-[10px] font-medium text-red-400"
+        title="No sources cited — treat this pick with extreme suspicion."
+      >
+        ⚠️ no sources
+      </span>
+    );
+  }
+  return (
+    <span
+      className="inline-flex items-center gap-1 rounded-full border border-border bg-accent px-2 py-0.5 text-[10px] font-medium text-muted-foreground"
+      title={`${count} source${count === 1 ? '' : 's'} cited`}
+    >
+      📰 {count} src
+    </span>
+  );
+}
+
+// Weak-evidence rule. Two triggers, kept close together so the UI message and
+// the threshold logic don't drift:
+//   1. Fewer than 2 sources overall — the floor we expect any pick to clear.
+//   2. A very high boom probability (>80) with fewer than 3 sources — a high
+//      conviction call demands more than a single article behind it.
+function isWeakEvidence(card: StockCard): boolean {
+  const n = card.sources?.length ?? 0;
+  if (n < 2) return true;
+  if (card.boomProbability > 80 && n < 3) return true;
+  return false;
 }
 
 function formatPriceLabel(
