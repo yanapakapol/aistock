@@ -36,35 +36,22 @@ export async function register(): Promise<void> {
     /* boot path stays clean */
   }
 
-  // In-process cron only fires while a long-running Node process stays
-  // alive. On Vercel (and other serverless hosts) the function dies after
-  // each request, so `croner` never gets to tick — that's why production
-  // routines are driven by Vercel Cron Jobs hitting `/api/cron/tick`
-  // instead (see `apps/web/vercel.json`).
+  // SCHEDULER BOOT REMOVED. Reasoning:
   //
-  // The in-process scheduler is therefore only started when:
-  //   1. We're in local dev (`NODE_ENV !== 'production'`, before this
-  //      function early-returns above — note we already returned in that
-  //      branch in older versions; that gate is now removed so dev DOES
-  //      start it), OR
-  //   2. The host operator explicitly opts in with
-  //      `AISTOCK_INPROCESS_SCHEDULER=1` (self-hosted long-running Node
-  //      where Vercel Cron isn't available).
-  // On Vercel (production), neither holds and we skip startup entirely.
-  const isLocalDev = process.env.NODE_ENV !== 'production';
-  const isExplicitOptIn = process.env.AISTOCK_INPROCESS_SCHEDULER === '1';
-  if (!isLocalDev && !isExplicitOptIn) return;
-  try {
-    // Drop webpackIgnore + .js extension: in `next dev` mode there is no
-    // pre-compiled .js file at that path, so the literal-path import 404s
-    // ("Cannot find module .../lib/scheduler/index.js"). Letting Next/
-    // webpack resolve the import normally finds the .ts source in dev and
-    // the compiled bundle in prod. The transitive native deps (croner,
-    // cron-parser, @primno/dpapi) are already in `serverExternalPackages`
-    // in next.config.ts so they don't get pulled into the bundle.
-    const mod = await import('./lib/scheduler');
-    await mod.getScheduler().start();
-  } catch (err) {
-    console.error('[scheduler] failed to start (non-fatal — Vercel Cron is the prod path):', err);
-  }
+  // - On Vercel (prod): the serverless function dies between requests, so
+  //   an in-process cron would never tick anyway. Vercel Cron Jobs hitting
+  //   `/api/cron/tick` are the prod path (see `apps/web/vercel.json`).
+  // - On local dev: `import('./lib/scheduler')` made webpack follow the
+  //   transitive chain (scheduler → run → mcp/tools/index → searchStocks
+  //   → market/yahoo → yahoo-finance2 → @deno/shim-deno → require('tty'))
+  //   and FAIL the entire instrumentation bundle. `webpackIgnore: true`
+  //   evaded the bundling but then the runtime path didn't resolve under
+  //   .next/server/. Either way the scheduler boot from instrumentation
+  //   didn't actually start anything.
+  //
+  // For local dev with cron-driven routines, run a separate process that
+  // polls `/api/cron/tick` (cron-job.org, GitHub Actions, or a tiny
+  // `setInterval(() => fetch('/api/cron/tick'), 60_000)` script). The
+  // routine logic itself (`runRoutineOnce`) is exported and works fine
+  // — it's only the in-process trigger that's gone.
 }
