@@ -200,8 +200,27 @@ export function PickerClient() {
       if (!res.ok || !ctype.includes('text/event-stream')) {
         let msg = `Scan failed (${res.status})`;
         try {
-          const j = (await res.json()) as { error?: string; detail?: string };
-          if (j?.error) msg = j.detail ? `${j.error}: ${j.detail}` : j.error;
+          const j = (await res.json()) as {
+            error?: string;
+            detail?: string;
+            issues?: Array<{ path?: (string | number)[]; message?: string }>;
+          };
+          if (j?.error) {
+            msg = j.detail ? `${j.error}: ${j.detail}` : j.error;
+            // If the server returned Zod issues (typical 400), spell out the
+            // first 3 so the user can see *which* fields failed instead of
+            // a flat "invalid request" message.
+            if (Array.isArray(j.issues) && j.issues.length > 0) {
+              const tips = j.issues
+                .slice(0, 3)
+                .map((iss) => {
+                  const path = (iss.path ?? []).join('.');
+                  return `${path || '(root)'}: ${iss.message ?? 'invalid'}`;
+                })
+                .join('; ');
+              msg = `${msg} — ${tips}`;
+            }
+          }
         } catch {
           // Non-JSON, non-stream body — keep status-based message.
         }

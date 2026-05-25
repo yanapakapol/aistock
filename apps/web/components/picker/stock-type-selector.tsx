@@ -59,19 +59,22 @@ export const STOCK_TYPES = [
     metrics: 'Beta >1, industrials/financials/materials/autos.',
   },
   {
-    id: 'small-cap',
+    // NOTE: ids use underscores (small_cap, mid_cap, large_cap, emerging_tech)
+    // to MATCH the /api/picker/scan Zod enum. Hyphens here would 400 the
+    // request — found and fixed in commit after the first picker rollout.
+    id: 'small_cap',
     label: 'Small-cap',
     description: 'Higher growth potential and volatility.',
     metrics: 'Market cap <$2B.',
   },
   {
-    id: 'mid-cap',
+    id: 'mid_cap',
     label: 'Mid-cap',
     description: 'Balanced growth-vs-stability profile.',
     metrics: 'Market cap $2B-$10B.',
   },
   {
-    id: 'large-cap',
+    id: 'large_cap',
     label: 'Large-cap',
     description: 'Stable, liquid market leaders.',
     metrics: 'Market cap >$10B.',
@@ -95,7 +98,7 @@ export const STOCK_TYPES = [
     metrics: 'Revenue/margin inflection, new management.',
   },
   {
-    id: 'emerging-tech',
+    id: 'emerging_tech',
     label: 'Emerging Tech',
     description: 'AI, biotech, EVs, robotics, quantum.',
     metrics: 'TAM expansion, R&D-heavy, frontier exposure.',
