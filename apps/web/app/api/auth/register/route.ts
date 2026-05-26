@@ -13,6 +13,18 @@ const Body = z.object({
   password: z.string().min(8).max(128),
 });
 
+// New-user default caps. Previously NULL → ∞ (e.g. the `Test2` row admins
+// saw with no cap on the users page). Now we mirror the guest pattern:
+// give every new account a sane daily ceiling. Admin can lift per-user via
+// /admin/users. The first user (the bootstrap admin) bypasses these
+// defaults — admins SHOULD start unlimited because they own the bill.
+//
+// Tuning rationale: ~10× the guest defaults — guests are throwaway
+// throwaway accounts; named users are presumably trusted-ish humans, so
+// they deserve more headroom by default. Tweak via the constants below.
+const USER_DEFAULT_TOKEN_CAP = 500_000;
+const USER_DEFAULT_USD_CAP = '5.00'; // string for numeric(8,4) column
+
 export async function POST(req: NextRequest) {
   if (req.headers.get('sec-fetch-site') && req.headers.get('sec-fetch-site') !== 'same-origin') {
     return NextResponse.json({ error: 'cross-origin denied' }, { status: 403 });
@@ -36,9 +48,22 @@ export async function POST(req: NextRequest) {
       sql`select count(*)::int as count from users`,
     )) as unknown as Array<{ count: number }>;
     const isAdmin = Number(count) === 0;
+    // Admin (bootstrap user) starts unlimited — they own the keys and the
+    // bill. Everyone else gets the user-role default caps; admin can lift
+    // them per-user via /admin/users.
     const [created] = await db
       .insert(users)
-      .values({ username, passwordHash, isAdmin })
+      .values(
+        isAdmin
+          ? { username, passwordHash, isAdmin }
+          : {
+              username,
+              passwordHash,
+              isAdmin,
+              dailyTokenCap: USER_DEFAULT_TOKEN_CAP,
+              dailyUsdCap: USER_DEFAULT_USD_CAP,
+            },
+      )
       .returning({ id: users.id, isAdmin: users.isAdmin });
     const role: 'admin' | 'user' = created!.isAdmin ? 'admin' : 'user';
     await createSession({ uid: created!.id, isAdmin: created!.isAdmin, role, username });

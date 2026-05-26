@@ -444,11 +444,21 @@ export async function POST(req: NextRequest) {
   // stopWhen so the model always has room for a final text synthesis step
   // after the last tool call (without this it can end on a tool call and
   // emit no assistant text at all).
+  // `iter` is a SAFETY NET ONLY — it caps runaway infinite tool-call loops
+  // but is set high enough (200) that the model never realistically hits it.
+  // Per-user explicit guidance was removed (was: 3/6/12/30 with the model
+  // being told "you have N tool calls"). The model now decides when it has
+  // enough information based on the per-user USD cap + the per-provider
+  // daily cap, not a hardcoded iteration ceiling.
+  //
+  // `usd` is the per-turn USD budget that the model SEES in the prompt; it
+  // still scales with effort to give the user a slider for "how deep should
+  // this dig go". `maxOutputTokens` is the synthesis cap on the FINAL answer.
   const EFFORT_PRESETS = {
-    low: { iter: 3, usd: 0.05, maxOutputTokens: 1500, reasoning: 'low' as const },
-    medium: { iter: 6, usd: 0.15, maxOutputTokens: 4000, reasoning: 'medium' as const },
-    high: { iter: 12, usd: 0.4, maxOutputTokens: 8000, reasoning: 'high' as const },
-    max: { iter: 30, usd: 1.0, maxOutputTokens: 16000, reasoning: 'high' as const },
+    low: { iter: 200, usd: 0.05, maxOutputTokens: 1500, reasoning: 'low' as const },
+    medium: { iter: 200, usd: 0.15, maxOutputTokens: 4000, reasoning: 'medium' as const },
+    high: { iter: 200, usd: 0.4, maxOutputTokens: 8000, reasoning: 'high' as const },
+    max: { iter: 200, usd: 1.0, maxOutputTokens: 16000, reasoning: 'high' as const },
   };
   const preset = EFFORT_PRESETS[effort ?? 'medium'];
   const effectiveIter = maxToolIterations ?? preset.iter;
@@ -559,10 +569,14 @@ export async function POST(req: NextRequest) {
         )
       : '';
   const analysisExtra = tab === 'analysis' ? ANALYSIS_EXTRA : '';
+  // Budget brief no longer mentions a tool-call iteration count — the iter
+  // ceiling is now a safety net (200) the model shouldn't ever hit. Only
+  // the USD budget steers depth. The "end on plain text" rule stays so we
+  // never emit a turn that's only tool calls with no synthesis.
   const budgetBrief =
     `BUDGET (this turn only, resets each user message; earlier-turn tool calls don't count): ` +
-    `${effectiveIter} tool calls, $${effectiveUsd.toFixed(2)} cap. ` +
-    `LAST step must be plain text — never end on a tool call. Stop calling tools by iteration ${Math.max(1, effectiveIter - 1)} and write the answer with what you have.`;
+    `$${effectiveUsd.toFixed(2)} cap. ` +
+    `LAST step must be plain text — never end on a tool call. Synthesize a final answer once you have enough evidence.`;
 
   const systemPreamble =
     SYSTEM_PREAMBLE_BASE +

@@ -67,9 +67,10 @@ const DEEP_RESEARCH_PROMPT = (s: StockLite) =>
     `Phase 5 — Call consolidate_events({stock_id: ${s.id}, dry_run: false}) once.`,
     ``,
     `Phase 6 — Final reply: 5–10 bullet summary citing event IDs and source URLs, then the [[SAVED:E=…,F=…,C=…]] marker.`,
-    ``,
-    `Budget: up to 40 tool calls. If you hit the limit, stop cleanly with what you have.`,
   ].join('\n');
+  // (removed: hardcoded "Budget: up to 40 tool calls" — the chat route now
+  // sets an iteration safety net of 200 that the model is not told about,
+  // so we no longer want to mislead it with a tighter number here.)
 
 export function ResearchClient({ stock }: { stock: StockLite | null }) {
   const [sel, setSel] = useState<Selection>(DEFAULT_SEL);
