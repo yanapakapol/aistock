@@ -1,7 +1,6 @@
 import 'server-only';
 import { z } from 'zod';
 import { sql } from 'drizzle-orm';
-import { generateObject, NoObjectGeneratedError, type LanguageModel } from 'ai';
 
 import { db } from '@/lib/db/client';
 import { outboundAudit } from '@/lib/db/schema';
@@ -215,15 +214,27 @@ export interface Article {
 }
 
 // ---------- LLM provider fallback ----------
-
-// Mistral Medium primary per user spec — better ranking quality than Small
-// on news-grounded prompts. The split-job pattern (scan saves to DB, analyze
-// runs LLM) keeps each call's wall-clock under Vercel Hobby's 60s ceiling
-// without sacrificing model quality or context length.
+//
+// Each model is called AT MOST ONCE per analyze request. No same-model
+// self-heal retries (user spec — they ate the 55s watchdog without
+// reliably fixing things). The chain ESCALATES through different models
+// so a schema failure on one model has a real chance of succeeding on
+// the next, instead of retrying the same weak constraint.
+//
+// Order rationale (user spec — "always mistral first"):
+//   1. mistral-medium-latest  — user's preferred default, cheapest Mistral that handles 12-article context well.
+//   2. mistral-large-latest   — bigger Mistral, follows schema constraints more reliably.
+//   3. mistral-small-latest   — sometimes a smaller model paradoxically obeys structure better; also cheap.
+//   4. openai gpt-4o-mini     — cheap OpenAI with strict json_schema mode (constrained decoding, can't fail validation).
+//   5. openai gpt-4o          — last resort. Strict mode + most capable. Always succeeds.
+//
+// Hard cap of 5 entries — user spec ("total never exceed 5 call").
 export const PROVIDER_CHAIN: Array<{ provider: Provider; modelId: string }> = [
   { provider: 'mistral', modelId: 'mistral-medium-latest' },
+  { provider: 'mistral', modelId: 'mistral-large-latest' },
+  { provider: 'mistral', modelId: 'mistral-small-latest' },
+  { provider: 'openai', modelId: 'gpt-4o-mini' },
   { provider: 'openai', modelId: 'gpt-4o' },
-  { provider: 'anthropic', modelId: 'claude-3-5-sonnet-latest' },
 ];
 
 export const PROVIDER_HOST: Record<Provider, string> = {
@@ -335,8 +346,24 @@ export function buildPickerPrompt(args: {
   const stockTypesStr = stockTypes.length > 0 ? stockTypes.join(', ') : 'any';
   const minRiskProtection = RISK_MIN_PROTECTION[riskTolerance];
 
+  // FIRST-CALL DISCIPLINE: this prompt is engineered so Mistral Medium's
+  // very first call succeeds. The OUTPUT FORMAT block at the top is repeated
+  // verbatim by intent — Mistral's "soft" JSON mode benefits from the rules
+  // being stated both early AND late in the prompt. The schema's
+  // .describe() text on each field handles per-field shape; this block
+  // handles meta-level discipline (no markdown, exact URLs, integers, etc.).
   const systemPrompt =
-    `You are a SKEPTICAL stock analyst. You produce up to 6 well-evidenced candidates. RULES:\n\n` +
+    `You are a SKEPTICAL stock analyst.\n\n` +
+    `==========  OUTPUT FORMAT (READ FIRST, OBEY EXACTLY)  ==========\n` +
+    `• Output ONE raw JSON object that exactly matches the provided schema. NOTHING ELSE.\n` +
+    `• NO markdown. NO \`\`\`json fences. NO preamble. NO trailing prose. JSON ONLY.\n` +
+    `• Numbers are integers in 0-100 unless the schema says otherwise. Never write 83.5 — write 83.\n` +
+    `• Every URL in a \`sources\` array is a literal copy from the input article list. Do not edit, shorten, or invent URLs.\n` +
+    `• Cap arrays at the schema's max. If unsure, emit FEWER items, not more.\n` +
+    `• Any free-text field: keep concise but ≥1 character — never empty string.\n` +
+    `• If you cannot satisfy a constraint with the supplied articles, emit fewer cards. Never pad with low-quality picks.\n` +
+    `=================================================================\n\n` +
+    `ANALYSIS RULES:\n\n` +
     `1. EVIDENCE > NARRATIVE. Every claim MUST trace back to one of the articles ` +
     `you were given. If an article doesn't support a claim, do NOT make it.\n` +
     `2. Boom probability is a CALIBRATED estimate, not marketing copy. Most ` +
@@ -367,7 +394,8 @@ export function buildPickerPrompt(args: {
     `Target market(s): ${primaryMarketLabel}.\n` +
     (allowedExchanges.length > 0
       ? `Allowed exchanges: ${allowedExchanges.join(', ')}. Every \`exchange\` field must come from this list.\n`
-      : `Use the major listed exchanges in the target country (verify the ticker actually trades there).\n`);
+      : `Use the major listed exchanges in the target country (verify the ticker actually trades there).\n`) +
+    `\nREMINDER: output ONE raw JSON object only. No markdown fences. Integers for numeric fields. Verbatim URLs from the article list.`;
 
   const userPrompt =
     `Market(s): ${primaryMarketLabel}\n` +
@@ -537,144 +565,19 @@ export function normalizeStockCard(card: StockCard): StockCard | null {
   };
 }
 
-// ---------- Self-healing generateObject ----------
+// ---------- (removed) self-heal loop ----------
 //
-// Mistral Medium uses "soft" JSON mode — the schema is baked into the
-// system prompt and validated by Zod after the fact. There's no
-// constrained decoding, so a non-trivial schema like StockCardSchema
-// sometimes produces output that fails validation ("No object generated:
-// response did not match schema"). The CURRENT behavior was: throw,
-// fall through to gpt-4o/claude.
+// The earlier generateObjectWithSelfHeal helper retried the SAME Mistral
+// model up to 3 times on schema failure. That blew past the 55s watchdog
+// (3 × 20s) without reliably succeeding — repeating the same call against
+// the same weak constraint rarely produces a different answer.
 //
-// New behavior: when Mistral fails validation, capture the raw text it
-// emitted + the Zod error, then ASK MISTRAL TO FIX ITS OWN OUTPUT. Up to
-// `maxRepairs` extra attempts at temperature 0 so the repair is
-// deterministic. Only if all repairs also fail do we throw back to the
-// caller (which then triggers provider fallback).
+// New design (user spec): single call per model, escalate across DIFFERENT
+// models in PROVIDER_CHAIN — mistral-medium → mistral-large → mistral-small
+// → gpt-4o-mini → gpt-4o. Each model gets ONE shot. Total ≤ 5 calls
+// (user spec). The analyze route enforces a per-call AbortSignal timeout
+// AND a cumulative wall-clock guard so the chain bails before 55s.
 //
-// This keeps Mistral as the primary provider (user spec) without paying
-// the 30% silent-fail tax.
-export interface SelfHealOptions<TSchema extends z.ZodType> {
-  model: LanguageModel;
-  schema: TSchema;
-  system: string;
-  prompt: string;
-  /** How many EXTRA attempts beyond the first. Default: 2 → 3 total tries. */
-  maxRepairs?: number;
-  /** Called before each attempt so the UI can show "self-correcting…". */
-  onAttempt?: (info: {
-    attempt: number;
-    total: number;
-    isRepair: boolean;
-    previousError?: string;
-  }) => void;
-}
-
-export interface SelfHealResult<TSchema extends z.ZodType> {
-  object: z.infer<TSchema>;
-  attempts: number;
-  repaired: boolean;
-}
-
-export async function generateObjectWithSelfHeal<TSchema extends z.ZodType>(
-  opts: SelfHealOptions<TSchema>,
-): Promise<SelfHealResult<TSchema>> {
-  const { model, schema, system, prompt, onAttempt, maxRepairs = 2 } = opts;
-  const total = maxRepairs + 1;
-
-  let lastErr: unknown = null;
-  let lastRawText: string | null = null;
-  let lastErrSummary = '';
-
-  for (let attempt = 1; attempt <= total; attempt++) {
-    const isRepair = attempt > 1;
-    onAttempt?.({
-      attempt,
-      total,
-      isRepair,
-      previousError: isRepair ? lastErrSummary : undefined,
-    });
-
-    try {
-      const callSystem = isRepair
-        ? `${system}\n\n` +
-          `⚠ SELF-CORRECTION PASS. Your previous attempt FAILED schema validation. ` +
-          `Read the error and previous output below, then output a CORRECTED full ` +
-          `JSON response. NO markdown, NO commentary, NO code fences — just the ` +
-          `raw JSON object.`
-        : system;
-      const callPrompt = isRepair
-        ? buildRepairPrompt(prompt, lastRawText, lastErrSummary)
-        : prompt;
-
-      // mode: 'json' tells Mistral to use response_format: { type: 'json_object' }
-      // so we at least get syntactically-valid JSON. temperature: 0 on
-      // repair attempts so the model deterministically tries to satisfy
-      // the schema instead of riffing again.
-      const { object } = await generateObject({
-        model,
-        schema,
-        system: callSystem,
-        prompt: callPrompt,
-        mode: 'json',
-        temperature: isRepair ? 0 : 0.3,
-      } as Parameters<typeof generateObject>[0]);
-
-      return {
-        object: object as z.infer<TSchema>,
-        attempts: attempt,
-        repaired: isRepair,
-      };
-    } catch (err) {
-      lastErr = err;
-      // Pull the raw text + zod cause out of NoObjectGeneratedError so the
-      // repair prompt can show the model exactly what went wrong.
-      if (NoObjectGeneratedError.isInstance(err)) {
-        lastRawText = err.text ?? null;
-      }
-      lastErrSummary = summarizeValidationError(err);
-    }
-  }
-
-  // All repairs exhausted — bubble up to the caller's provider-fallback chain.
-  throw lastErr ?? new Error('generateObjectWithSelfHeal: unknown failure');
-}
-
-function summarizeValidationError(err: unknown): string {
-  // Zod error path → "cards.0.industryContext (too_small): String must contain at least 40 character(s)"
-  const cause = (err as { cause?: unknown })?.cause;
-  if (cause instanceof z.ZodError) {
-    return cause.issues
-      .slice(0, 8)
-      .map(
-        (i) =>
-          `${i.path.join('.') || '<root>'} (${i.code}): ${i.message}`,
-      )
-      .join('\n');
-  }
-  if (err instanceof Error) return err.message.slice(0, 400);
-  return String(err).slice(0, 400);
-}
-
-function buildRepairPrompt(
-  originalPrompt: string,
-  previousText: string | null,
-  errorSummary: string,
-): string {
-  const previousBlock = previousText
-    ? `YOUR PREVIOUS OUTPUT (which failed validation):\n\n${previousText.slice(0, 6000)}\n\n`
-    : `YOUR PREVIOUS OUTPUT could not be parsed at all (likely missing or malformed JSON).\n\n`;
-  return (
-    previousBlock +
-    `VALIDATION ERRORS (path : code : reason):\n${errorSummary}\n\n` +
-    `INSTRUCTIONS:\n` +
-    `1. Read each error carefully. Fix EXACTLY those fields.\n` +
-    `2. Output the COMPLETE corrected JSON object — not just the fixed fields.\n` +
-    `3. No markdown, no \`\`\`json fences, no preamble. Raw JSON only.\n` +
-    `4. Integer-typed fields: write integers (\`83\`, not \`83.5\`).\n` +
-    `5. Score fields: clamp to 0-100.\n` +
-    `6. URL fields: use the EXACT urls from the article list — copy/paste.\n` +
-    `7. Array length bounds in the error mean: produce the right number of items.\n\n` +
-    `ORIGINAL TASK (re-read for context):\n\n${originalPrompt}`
-  );
-}
+// First-call quality is hardened in buildPickerPrompt (explicit OUTPUT
+// FORMAT block) + loosened StockCardSchema + post-call normalizeStockCard
+// so the fallbacks usually never fire.

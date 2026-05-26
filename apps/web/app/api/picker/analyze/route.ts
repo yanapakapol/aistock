@@ -15,6 +15,8 @@ import type { Provider } from '@/lib/llm/providers';
 // chain are LITERALLY the same as the scan side — no duplication, no drift.
 // The helper lives in lib/picker (NOT in a route module) because Next.js
 // route files only allow specific named exports.
+import { generateObject } from 'ai';
+
 import {
   PROVIDER_CHAIN,
   PROVIDER_HOST,
@@ -23,7 +25,6 @@ import {
   buildPickerPrompt,
   ensurePickerJobsTable,
   formatDbError,
-  generateObjectWithSelfHeal,
   normalizeStockCard,
   recordAudit,
   resolveMarketLabel,
@@ -280,16 +281,18 @@ export async function POST(req: NextRequest) {
       });
 
     // ---- Load LLM keys (parallel) ----
+    // PROVIDER_CHAIN now uses 3 Mistral variants + 2 OpenAI variants; both
+    // keys are reused across variants of the same provider so we only need
+    // two DB lookups regardless of chain length.
     phase = 'discover-keys';
-    const [mistralKey, openaiKey, anthropicKey] = await Promise.all([
+    const [mistralKey, openaiKey] = await Promise.all([
       loadApiKey('mistral').catch(() => null),
       loadApiKey('openai').catch(() => null),
-      loadApiKey('anthropic').catch(() => null),
     ]);
     const keyByProvider: Record<Provider, string | null> = {
       mistral: mistralKey,
       openai: openaiKey,
-      anthropic: anthropicKey,
+      anthropic: null,
       google: null,
       moonshot: null,
       deepseek: null,
@@ -318,56 +321,73 @@ export async function POST(req: NextRequest) {
     const articleUrlSet = new Set(articles.map((a) => a.url.toLowerCase()));
     let lastErr: unknown = null;
 
+    // Wall-clock anchor for the cumulative budget guard inside the loop.
+    // 55s outer watchdog - safety margin = ~45s usable LLM budget.
+    const chainStart = Date.now();
+    let attemptIndex = 0;
+
     for (const attempt of PROVIDER_CHAIN) {
+      attemptIndex++;
       const key = keyByProvider[attempt.provider];
-      if (!key) continue;
+      if (!key) {
+        console.warn(
+          `[picker/analyze] skipping ${attempt.provider}/${attempt.modelId}: no API key`,
+        );
+        continue;
+      }
 
       emitter.phase(
         'llm-streaming',
-        `Calling ${attempt.provider} (${attempt.modelId})...`,
-        { provider: attempt.provider, model: attempt.modelId },
+        `Calling ${attempt.modelId} (model ${attemptIndex}/${PROVIDER_CHAIN.length})...`,
+        {
+          provider: attempt.provider,
+          model: attempt.modelId,
+          attempt: attemptIndex,
+          total: PROVIDER_CHAIN.length,
+        },
       );
+
+      // Per-call AbortSignal timeout — one stuck model can't drown the
+      // whole 55s budget. First (Mistral Medium) gets the most time
+      // because it's expected to succeed; fallbacks fail-fast so we
+      // can reach the always-works OpenAI tail before the watchdog.
+      const isFirstAttempt = attempt === PROVIDER_CHAIN[0];
+      const perCallMs = isFirstAttempt ? 28_000 : 14_000;
+
+      // Cumulative wall-clock guard — bail BEFORE the outer 55s watchdog
+      // bites, so we surface a clean error instead of a generic timeout.
+      const elapsed = Date.now() - chainStart;
+      if (elapsed > 45_000) {
+        console.warn(
+          `[picker/analyze] chain budget exhausted (${elapsed}ms) before ${attempt.provider}/${attempt.modelId} — stopping fallback`,
+        );
+        break;
+      }
 
       const llmStart = Date.now();
       try {
         const model = await clientFor(attempt.provider, attempt.modelId, key);
 
-        // SELF-HEAL: when the schema validates, this is one LLM call.
-        // When it fails ("No object generated: response did not match
-        // schema"), the wrapper captures the raw text + Zod error and
-        // asks Mistral to FIX its own output. Up to 2 repair attempts
-        // (3 total LLM calls) at temperature 0 before we throw to the
-        // provider fallback. Keeps Mistral as primary per user spec
-        // without the 30% silent-fail tax.
-        const { object, attempts, repaired } = await generateObjectWithSelfHeal({
+        // ONE call per model. No same-model retry (user spec — those ate
+        // the 55s watchdog without helping). If validation fails, we move
+        // on to the next model in the chain via the outer for-loop.
+        //
+        // temperature: 0 → deterministic output, easiest path to schema
+        //   compliance. The hardened OUTPUT FORMAT block in the system
+        //   prompt does the steering.
+        // abortSignal → per-call hard cap; throws AbortError which the
+        //   catch below routes to the next provider.
+        const { object } = await generateObject({
           model,
           schema: ResultSchema,
           system: systemPrompt,
           prompt: userPrompt,
-          maxRepairs: 2,
-          onAttempt: ({ attempt: a, total, isRepair, previousError }) => {
-            if (!isRepair) return;
-            emitter.phase(
-              'llm-self-heal',
-              `Output didn't match schema — asking ${attempt.provider} to self-correct (try ${a}/${total})...`,
-              {
-                provider: attempt.provider,
-                model: attempt.modelId,
-                attempt: a,
-                total,
-                previousError: previousError?.slice(0, 240),
-              },
-            );
-          },
+          temperature: 0,
+          abortSignal: AbortSignal.timeout(perCallMs),
         });
-        if (repaired) {
-          console.warn(
-            `[picker/analyze] ${attempt.provider} self-healed in ${attempts} attempt(s)`,
-          );
-        }
 
         recordAudit(
-          `picker.analyze.${attempt.provider}${repaired ? '.repaired' : ''}`,
+          `picker.analyze.${attempt.provider}`,
           PROVIDER_HOST[attempt.provider],
           200,
           Date.now() - llmStart,
