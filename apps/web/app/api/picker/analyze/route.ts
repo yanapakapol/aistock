@@ -1,7 +1,6 @@
 import { type NextRequest, NextResponse } from 'next/server';
 import { z } from 'zod';
 import { and, eq } from 'drizzle-orm';
-import { generateObject } from 'ai';
 
 import { db } from '@/lib/db/client';
 import { pickerJobs } from '@/lib/db/schema';
@@ -24,6 +23,8 @@ import {
   buildPickerPrompt,
   ensurePickerJobsTable,
   formatDbError,
+  generateObjectWithSelfHeal,
+  normalizeStockCard,
   recordAudit,
   resolveMarketLabel,
   sseDone,
@@ -330,23 +331,61 @@ export async function POST(req: NextRequest) {
       const llmStart = Date.now();
       try {
         const model = await clientFor(attempt.provider, attempt.modelId, key);
-        const { object } = await generateObject({
+
+        // SELF-HEAL: when the schema validates, this is one LLM call.
+        // When it fails ("No object generated: response did not match
+        // schema"), the wrapper captures the raw text + Zod error and
+        // asks Mistral to FIX its own output. Up to 2 repair attempts
+        // (3 total LLM calls) at temperature 0 before we throw to the
+        // provider fallback. Keeps Mistral as primary per user spec
+        // without the 30% silent-fail tax.
+        const { object, attempts, repaired } = await generateObjectWithSelfHeal({
           model,
           schema: ResultSchema,
           system: systemPrompt,
           prompt: userPrompt,
+          maxRepairs: 2,
+          onAttempt: ({ attempt: a, total, isRepair, previousError }) => {
+            if (!isRepair) return;
+            emitter.phase(
+              'llm-self-heal',
+              `Output didn't match schema — asking ${attempt.provider} to self-correct (try ${a}/${total})...`,
+              {
+                provider: attempt.provider,
+                model: attempt.modelId,
+                attempt: a,
+                total,
+                previousError: previousError?.slice(0, 240),
+              },
+            );
+          },
         });
+        if (repaired) {
+          console.warn(
+            `[picker/analyze] ${attempt.provider} self-healed in ${attempts} attempt(s)`,
+          );
+        }
 
         recordAudit(
-          `picker.analyze.${attempt.provider}`,
+          `picker.analyze.${attempt.provider}${repaired ? '.repaired' : ''}`,
           PROVIDER_HOST[attempt.provider],
           200,
           Date.now() - llmStart,
         ).catch(() => undefined);
 
-        // ---- Post-LLM validation (same rules as the old scan route) ----
+        // ---- Post-LLM normalization + validation ----
+        // Normalizer tightens what the (intentionally loose) Zod schema
+        // didn't: clamp scores to 0-100, round to int, strip trailing
+        // markdown chars from URLs. THEN apply the business filters.
         const filtered: StockCard[] = [];
-        for (const card of object.cards) {
+        for (const rawCard of object.cards) {
+          const card = normalizeStockCard(rawCard);
+          if (!card) {
+            console.warn(
+              `[picker/analyze] dropping ${rawCard.symbol}: normalization failed`,
+            );
+            continue;
+          }
           const cleanSources = card.sources.filter((u) =>
             articleUrlSet.has(u.toLowerCase()),
           );
