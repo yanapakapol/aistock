@@ -22,6 +22,8 @@ import {
   RISK_MIN_PROTECTION,
   ResultSchema,
   buildPickerPrompt,
+  ensurePickerJobsTable,
+  formatDbError,
   recordAudit,
   resolveMarketLabel,
   sseDone,
@@ -202,8 +204,13 @@ export async function POST(req: NextRequest) {
     const { jobId, userId, emitter } = args;
 
     // ---- Load + ownership-check the job ----
+    // ensurePickerJobsTable() closes the race with the background
+    // ensureSchema() bumper — see scan/route.ts for the full rationale.
     phase = 'load-job';
     emitter.phase('load-job', `Loading job #${jobId} from storage...`);
+    await ensurePickerJobsTable().catch((err) => {
+      console.error('[picker/analyze] ensurePickerJobsTable failed:', formatDbError(err));
+    });
     const rows = await db
       .select()
       .from(pickerJobs)

@@ -19,6 +19,8 @@ import {
   PROVIDER_CHAIN,
   PROVIDER_HOST,
   buildQueries,
+  ensurePickerJobsTable,
+  formatDbError,
   recordAudit,
   resolveMarketLabel,
   sseDone,
@@ -454,9 +456,14 @@ export async function POST(req: NextRequest) {
     // Medium against the FULL context. Storing the resolved market label
     // + allowed exchanges in `params` so analyze doesn't have to re-run
     // autoPickMarket (a billable LLM call).
+    //
+    // ensurePickerJobsTable() closes the race with ensureSchema() — the
+    // background bumper might not have created picker_jobs yet on a fresh
+    // deploy. Idempotent + memoized, so it costs nothing after the first hit.
     phase = 'persist-job';
     let jobId: number;
     try {
+      await ensurePickerJobsTable();
       const inserted = await db
         .insert(pickerJobs)
         .values({
@@ -472,7 +479,9 @@ export async function POST(req: NextRequest) {
         .returning({ id: pickerJobs.id });
       jobId = inserted[0]!.id;
     } catch (err) {
-      console.error('[picker/scan] picker_jobs insert failed:', sanitizeError(err));
+      // Verbose log so future regressions don't need a re-deploy to triage:
+      // surfaces PG `code` / `detail` / `column` / `constraint`.
+      console.error('[picker/scan] picker_jobs insert failed:', formatDbError(err));
       emitter.error(
         'Failed to persist scan results. Try again in a moment.',
         'persist-job',

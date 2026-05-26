@@ -1,5 +1,6 @@
 import 'server-only';
 import { z } from 'zod';
+import { sql } from 'drizzle-orm';
 
 import { db } from '@/lib/db/client';
 import { outboundAudit } from '@/lib/db/schema';
@@ -366,4 +367,71 @@ export function buildPickerPrompt(args: {
     `Emit fewer cards if the evidence or risk filter doesn't justify 6.`;
 
   return { systemPrompt, userPrompt };
+}
+
+// ---------- Self-healing picker_jobs guard ----------
+//
+// Why this exists: `ensureSchema()` is fire-and-forget (returns immediately,
+// runs ~90 bumps in the background). The very first picker request after a
+// new deploy can race the bumper and try to INSERT into picker_jobs before
+// CREATE TABLE has run — Postgres then throws `relation "picker_jobs" does
+// not exist` and the whole scan flow dies with an opaque "db_insert_failed".
+//
+// Mirroring the same CREATE TABLE IF NOT EXISTS that ensure-schema runs
+// is cheap (~10ms on Neon HTTP), idempotent, and removes the race entirely.
+// Memoized per-process via globalThis so we don't pay the round-trip on
+// every request once the bumper has caught up.
+//
+// Keep this DDL bit-for-bit identical to apps/web/lib/db/ensure-schema.ts §5.
+declare global {
+  // eslint-disable-next-line no-var
+  var __pickerJobsTableEnsured: Promise<void> | undefined;
+}
+
+export function ensurePickerJobsTable(): Promise<void> {
+  if (!globalThis.__pickerJobsTableEnsured) {
+    globalThis.__pickerJobsTableEnsured = (async () => {
+      await db.execute(sql`CREATE TABLE IF NOT EXISTS picker_jobs (
+        id serial PRIMARY KEY,
+        user_id integer NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        status text NOT NULL DEFAULT 'searching',
+        params jsonb NOT NULL,
+        articles jsonb,
+        cards jsonb,
+        sources jsonb,
+        error text,
+        created_at timestamptz NOT NULL DEFAULT now(),
+        updated_at timestamptz NOT NULL DEFAULT now()
+      )`);
+      await db.execute(
+        sql`CREATE INDEX IF NOT EXISTS picker_jobs_user_created_idx ON picker_jobs (user_id, created_at DESC)`,
+      );
+    })().catch((err) => {
+      // Reset memo so the next request retries — never strand the user on a
+      // transient DDL hiccup.
+      globalThis.__pickerJobsTableEnsured = undefined;
+      throw err;
+    });
+  }
+  return globalThis.__pickerJobsTableEnsured;
+}
+
+// ---------- Verbose DB-error formatter ----------
+//
+// Drizzle wraps the Neon error so `.message` is just "Failed query: insert
+// into ...". The actual PG details (`code`, `detail`, `hint`, `column`,
+// `constraint`) live on the cause object. Surface them so production
+// triage doesn't require re-deploying with extra logging.
+export function formatDbError(err: unknown): Record<string, unknown> {
+  const e = err as Record<string, unknown> | null | undefined;
+  const cause = (e?.cause ?? null) as Record<string, unknown> | null;
+  return {
+    message: sanitizeError(err),
+    code: cause?.code ?? e?.code,
+    detail: cause?.detail ?? e?.detail,
+    hint: cause?.hint ?? e?.hint,
+    column: cause?.column ?? e?.column,
+    constraint: cause?.constraint ?? e?.constraint,
+    table: cause?.table ?? e?.table,
+  };
 }
