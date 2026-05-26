@@ -23,6 +23,7 @@ import {
   formatDbError,
   recordAudit,
   resolveMarketLabel,
+  sanitizeArticlesForJsonb,
   sseDone,
   sseFormat,
   type Article,
@@ -464,6 +465,11 @@ export async function POST(req: NextRequest) {
     let jobId: number;
     try {
       await ensurePickerJobsTable();
+      // Strip NUL + other C0 control bytes Tavily picks up from scraped
+      // HTML/PDF — jsonb rejects them with SQLSTATE 22P05 and the whole
+      // scan is wasted. See sanitizeArticlesForJsonb() for the full
+      // codepoint set.
+      const safeArticles = sanitizeArticlesForJsonb(deduped);
       const inserted = await db
         .insert(pickerJobs)
         .values({
@@ -474,7 +480,7 @@ export async function POST(req: NextRequest) {
             _primaryMarketLabel: primaryMarketLabel,
             _allowedExchanges: allowedExchanges,
           },
-          articles: deduped,
+          articles: safeArticles,
         })
         .returning({ id: pickerJobs.id });
       jobId = inserted[0]!.id;

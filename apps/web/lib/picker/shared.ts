@@ -388,6 +388,46 @@ declare global {
   var __pickerJobsTableEnsured: Promise<void> | undefined;
 }
 
+// ---------- Article sanitizer ----------
+//
+// Postgres `jsonb` rejects strings containing the Unicode null character
+// ( ) with SQLSTATE 22P05 "unsupported Unicode escape sequence". Tavily
+// returns content scraped from arbitrary web pages — PDF text layers, HTML
+// fragments, scraped tables — and those frequently smuggle in NULs and other
+// disallowed control bytes. The INSERT then dies and the whole picker scan
+// is wasted (Tavily quota burned for nothing).
+//
+// Strip every C0 control char except the three that are actually printable
+// (\t \n \r) AND the U+FFFE / U+FFFF non-characters that JSON.stringify
+// happily passes through but jsonb rejects. Trim to a generous cap so a
+// single runaway article can't push the row past Neon's row-size limit.
+//
+// Idempotent and cheap (single regex sweep per field).
+//
+// Built via `new RegExp` from explicit \uXXXX escapes so the source file
+// never contains the literal control bytes (which break some editors,
+// grep, and the codepoints can even round-trip differently through
+// different Git autocrlf settings).
+// eslint-disable-next-line no-control-regex
+const CTRL_RE_SAFE = new RegExp(
+  '[\\u0000-\\u0008\\u000B\\u000C\\u000E-\\u001F\\u007F\\uFFFE\\uFFFF]',
+  'g',
+);
+function scrubForJsonb(s: string | null | undefined, max = 4000): string {
+  if (!s) return '';
+  return s.replace(CTRL_RE_SAFE, '').slice(0, max);
+}
+
+export function sanitizeArticlesForJsonb(articles: Article[]): Article[] {
+  return articles.map((a) => ({
+    ...a,
+    url: scrubForJsonb(a.url, 500),
+    title: scrubForJsonb(a.title, 300),
+    content: scrubForJsonb(a.content, 4000),
+    publishedDate: scrubForJsonb(a.publishedDate, 100),
+  }));
+}
+
 export function ensurePickerJobsTable(): Promise<void> {
   if (!globalThis.__pickerJobsTableEnsured) {
     globalThis.__pickerJobsTableEnsured = (async () => {
@@ -418,20 +458,34 @@ export function ensurePickerJobsTable(): Promise<void> {
 
 // ---------- Verbose DB-error formatter ----------
 //
-// Drizzle wraps the Neon error so `.message` is just "Failed query: insert
-// into ...". The actual PG details (`code`, `detail`, `hint`, `column`,
-// `constraint`) live on the cause object. Surface them so production
-// triage doesn't require re-deploying with extra logging.
+// Drizzle wraps the Neon error so `.message` is `Failed query: insert into
+// ... params: ...` with the FULL parameter dump inline. The picker insert
+// has a multi-KB articles jsonb payload, so the message alone can blow past
+// Vercel's log line size limit and truncate every field after it.
+//
+// Field order matters: diagnostic fields come FIRST so PG `code` / `detail`
+// / `column` / `constraint` survive even if the `message` is truncated. We
+// also strip the inline `params: ...` suffix to keep the message compact.
 export function formatDbError(err: unknown): Record<string, unknown> {
   const e = err as Record<string, unknown> | null | undefined;
+  // Drizzle wraps the underlying NeonDbError on .cause; that's where the
+  // PG fields actually live. Fall through to the outer error as backup.
   const cause = (e?.cause ?? null) as Record<string, unknown> | null;
+  const raw = sanitizeError(err).message;
+  // Drop the `params: ...` tail — keeps the SQL skeleton visible without
+  // dragging the full jsonb payload into the log.
+  const message = raw.split('\nparams:')[0]?.slice(0, 600) ?? raw;
   return {
-    message: sanitizeError(err),
-    code: cause?.code ?? e?.code,
-    detail: cause?.detail ?? e?.detail,
-    hint: cause?.hint ?? e?.hint,
-    column: cause?.column ?? e?.column,
-    constraint: cause?.constraint ?? e?.constraint,
-    table: cause?.table ?? e?.table,
+    // Diagnostic fields first — survive truncation.
+    code: cause?.code ?? e?.code ?? null,
+    detail: cause?.detail ?? e?.detail ?? null,
+    hint: cause?.hint ?? e?.hint ?? null,
+    column: cause?.column ?? e?.column ?? null,
+    constraint: cause?.constraint ?? e?.constraint ?? null,
+    table: cause?.table ?? e?.table ?? null,
+    severity: cause?.severity ?? e?.severity ?? null,
+    routine: cause?.routine ?? e?.routine ?? null,
+    // Compact message last.
+    message,
   };
 }
