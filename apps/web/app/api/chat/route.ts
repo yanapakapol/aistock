@@ -39,6 +39,109 @@ export const revalidate = 0;
 const __BUILD_STAMP__ = 'chat-route-2026-05-25T02-15-00Z-rev5-options-handler';
 void __BUILD_STAMP__;
 
+// ---------- Orphan-tool-call sanitizer ----------
+//
+// AI SDK v6 rejects message histories where an assistant message has a
+// tool-call (or dynamic-tool-call) `part` whose `toolCallId` doesn't have
+// a matching tool-result `part` later in the stream:
+//   "Tool results are missing for tool calls X, Y, Z"
+//
+// This happens whenever a previous turn was interrupted between emitting
+// the tool-call and persisting the tool-result — Vercel 60s timeout,
+// browser close, watchdog fire, provider 500 mid-stream. The assistant
+// row lands in chat_messages.parts with tool-call parts but no matching
+// tool-result. On the next turn the client hydrates the chat history,
+// POSTs the malformed array, and convertToModelMessages throws.
+//
+// Fix: walk the messages and PAIR every tool-call with either its real
+// tool-result (already in the history) or a synthetic "aborted" stub.
+// Synthetic stubs are preferred over dropping the tool-call entirely so
+// the assistant's reasoning chain stays intact for the model to read.
+//
+// Idempotent — running on already-clean histories is a no-op.
+type ChatPart = {
+  type: string;
+  toolCallId?: string;
+  state?: string;
+  [k: string]: unknown;
+};
+type ChatMessage = {
+  role: 'user' | 'assistant' | 'system' | 'tool';
+  content?: string;
+  parts?: ChatPart[];
+  [k: string]: unknown;
+};
+
+function isToolCallPart(p: ChatPart): boolean {
+  // v6 emits 'tool-call' for static tools and 'dynamic-tool-call' for
+  // MCP / dynamic tools. UIMessage format uses 'tool-<name>' for parts
+  // with a `state` field — we treat any of those as tool calls too.
+  if (p.type === 'tool-call' || p.type === 'dynamic-tool-call') return true;
+  if (typeof p.type === 'string' && p.type.startsWith('tool-') && p.toolCallId) {
+    // 'tool-<name>' parts can be either side (input-* / output-*).
+    // Treat them as a tool-call when there's no output present.
+    const s = String(p.state ?? '');
+    return s.startsWith('input-') || s === 'call';
+  }
+  return false;
+}
+function isToolResultPart(p: ChatPart): boolean {
+  if (p.type === 'tool-result' || p.type === 'dynamic-tool-result') return true;
+  if (typeof p.type === 'string' && p.type.startsWith('tool-') && p.toolCallId) {
+    const s = String(p.state ?? '');
+    return s.startsWith('output-') || s === 'result';
+  }
+  return false;
+}
+
+function sanitizeOrphanToolCalls<M extends ChatMessage>(messages: M[]): M[] {
+  // Pass 1: collect every toolCallId that HAS a result anywhere in history.
+  const resultIds = new Set<string>();
+  for (const m of messages) {
+    for (const p of m.parts ?? []) {
+      if (isToolResultPart(p) && typeof p.toolCallId === 'string') {
+        resultIds.add(p.toolCallId);
+      }
+    }
+  }
+
+  // Pass 2: for each assistant message, find tool-calls with no matching
+  // result and inject a synthetic tool-result for them in the SAME message.
+  // We add it as a sibling part so the AI SDK sees the pair on conversion.
+  const out: M[] = [];
+  for (const m of messages) {
+    if (!m.parts || m.parts.length === 0) {
+      out.push(m);
+      continue;
+    }
+    const newParts: ChatPart[] = [...m.parts];
+    const seenIds = new Set<string>();
+    for (const p of m.parts) {
+      if (!isToolCallPart(p) || typeof p.toolCallId !== 'string') continue;
+      if (seenIds.has(p.toolCallId)) continue;
+      seenIds.add(p.toolCallId);
+      if (resultIds.has(p.toolCallId)) continue; // real result exists somewhere
+      // Inject synthetic stub — uses the same toolCallId so the SDK can pair.
+      const stubName =
+        (p as { toolName?: string }).toolName ??
+        (typeof p.type === 'string' && p.type.startsWith('tool-')
+          ? p.type.slice(5)
+          : 'unknown_tool');
+      newParts.push({
+        type: 'tool-result',
+        toolCallId: p.toolCallId,
+        toolName: stubName,
+        result: { __aborted: true, reason: 'previous turn interrupted before result' },
+        output: { __aborted: true, reason: 'previous turn interrupted before result' },
+      });
+      resultIds.add(p.toolCallId); // don't double-inject in later messages
+    }
+    out.push({ ...m, parts: newParts });
+  }
+
+  return out;
+}
+
 /**
  * OPTIONS /api/chat — CORS preflight + bundle-shape changer.
  *
@@ -838,8 +941,15 @@ export async function POST(req: NextRequest) {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     let result: any;
     try {
+      // Sanitize first: pair every assistant tool-call with either its real
+      // tool-result or a synthetic "aborted" stub so convertToModelMessages
+      // doesn't reject the history with "Tool results are missing for tool
+      // calls X, Y, Z". See sanitizeOrphanToolCalls at top of file.
+      const cleanMessages = sanitizeOrphanToolCalls(messages as never as ChatMessage[]);
       // convertToModelMessages is async in this SDK version — must await.
-      const modelMessages = (await convertToModelMessages(messages as never)) as ModelMessage[];
+      const modelMessages = (await convertToModelMessages(
+        cleanMessages as never,
+      )) as ModelMessage[];
       phase('messages converted, calling streamText');
       result = streamText({
         model,
