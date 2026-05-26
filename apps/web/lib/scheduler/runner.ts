@@ -1,7 +1,7 @@
 import 'server-only';
 import { eq } from 'drizzle-orm';
 import { db } from '../db/client';
-import { routines } from '../db/schema';
+import { routines, users } from '../db/schema';
 import { runRoutineOnce, type RoutineForRun } from './run';
 
 /**
@@ -12,6 +12,11 @@ import { runRoutineOnce, type RoutineForRun } from './run';
  * `runRoutineOnce`. If the routine has been deleted or disabled between the
  * cron firing and this call, we bail silently — the cron will be cleaned up
  * on the next `reload()`.
+ *
+ * Left-joins `users` so the routine carries its owner's role into
+ * `runRoutineOnce` — the admin-bypass on the per-provider DAILY cap reads
+ * this. Routines that pre-date the user_id column (orphans) get
+ * `ownerRole = null` and behave like normal users (no bypass).
  */
 export async function runRoutineById(routineId: number): Promise<void> {
   const rows = await db
@@ -24,8 +29,10 @@ export async function runRoutineById(routineId: number): Promise<void> {
       maxUsdPerRun: routines.maxUsdPerRun,
       tz: routines.tz,
       enabled: routines.enabled,
+      ownerRole: users.role,
     })
     .from(routines)
+    .leftJoin(users, eq(routines.userId, users.id))
     .where(eq(routines.id, routineId))
     .limit(1);
 
@@ -40,6 +47,7 @@ export async function runRoutineById(routineId: number): Promise<void> {
     fallbackModels: row.fallbackModels ?? [],
     maxUsdPerRun: row.maxUsdPerRun,
     tz: row.tz,
+    ownerRole: row.ownerRole ?? null,
   };
 
   await runRoutineOnce(routine);

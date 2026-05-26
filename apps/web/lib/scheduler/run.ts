@@ -3,7 +3,7 @@ import { eq } from 'drizzle-orm';
 import { streamText, type ModelMessage } from 'ai';
 
 import { db } from '../db/client';
-import { routineRuns, routines } from '../db/schema';
+import { routineRuns, routines, users } from '../db/schema';
 
 import { PROVIDERS, type Provider } from '../llm/providers';
 import { loadApiKey } from '../llm/keys';
@@ -26,6 +26,7 @@ import type { ToolHandler } from '../mcp/types';
 
 import { meter } from '../cost/meter';
 import { addSpend, checkBudgetOrThrow } from '../cost/ledger';
+import { getProviderDailyCap } from '../cost/limits';
 import { scrubSecrets, sanitizeError } from '../security/scrub';
 
 import { CronExpressionParser } from 'cron-parser';
@@ -43,6 +44,13 @@ export interface RoutineForRun {
   fallbackModels: string[];
   maxUsdPerRun: string | number;
   tz: string;
+  /**
+   * Role of the routine's owner. Used to bypass the per-provider DAILY cap
+   * for admin-owned routines (same rule as the chat route: admins set their
+   * own caps, so a global ceiling shouldn't preempt them).
+   * Null when the routine pre-dates the user_id column (orphan).
+   */
+  ownerRole?: 'admin' | 'user' | 'guest' | null;
 }
 
 // Heuristic token estimate: 1 token ~= 4 chars. Matches the cap used at the
@@ -149,7 +157,17 @@ export async function runRoutineOnce(routine: RoutineForRun): Promise<void> {
     .returning({ id: routineRuns.id });
 
   try {
-    const capUsd = Number(routine.maxUsdPerRun) || 0;
+    // Two separate constraints, each with its own meaning:
+    //   - `perRunCapUsd` is the routine OWNER's self-imposed per-run cost
+    //     ceiling. NOT a daily cap. We enforce it inline against the
+    //     planned cost of THIS run only.
+    //   - `dailyCapUsd` is the env-driven global per-provider daily ceiling,
+    //     compared against the budget ledger. Admins bypass via opts.isAdmin.
+    // Previously these were conflated and `maxUsdPerRun` was passed to
+    // checkBudgetOrThrow, which meant the daily ledger filling past the
+    // per-run cap caused EVERY routine to fail — that bug is gone now.
+    const perRunCapUsd = Number(routine.maxUsdPerRun) || 0;
+    const ownerIsAdmin = routine.ownerRole === 'admin';
     // Lazy-load TOOLS to break the static import cycle through
     // mcp/tools/index → createRoutine → @/lib/scheduler. See top-of-file
     // comment for the full chain. The await here is a no-op after the
@@ -206,8 +224,30 @@ export async function runRoutineOnce(routine: RoutineForRun): Promise<void> {
         tokensIn: tokensInEst,
         tokensOut: PLANNED_TOKENS_OUT,
       });
+
+      // Per-run cap (owner-set on the routine). Independent of the daily
+      // ledger — even an admin should respect their own per-run cap since
+      // they set it themselves. No bypass here.
+      if (perRunCapUsd > 0 && plannedUsd > perRunCapUsd) {
+        const err = new Error(
+          `per-run budget exceeded for ${provider}/${modelId}: ` +
+            `$${plannedUsd.toFixed(4)} planned > $${perRunCapUsd.toFixed(2)} max_usd_per_run`,
+        ) as Error & { status?: number; code?: string };
+        err.status = 429;
+        err.code = 'budget_exceeded';
+        const detail = sanitizeError(err);
+        await failRun(
+          run.id,
+          routine.id,
+          `per-run budget exceeded: ${detail.message}`,
+        );
+        return;
+      }
+
       try {
-        await checkBudgetOrThrow(provider, plannedUsd, capUsd);
+        await checkBudgetOrThrow(provider, plannedUsd, getProviderDailyCap(provider), {
+          isAdmin: ownerIsAdmin,
+        });
       } catch (err) {
         if (isBudgetExceeded(err)) {
           // Budget is a global concern — do not fall back to a cheaper model
@@ -430,8 +470,13 @@ export async function runDueRoutines(
       cronExpr: routines.cronExpr,
       tz: routines.tz,
       lastRunAt: routines.lastRunAt,
+      // Left-joined so admin-owned routines can bypass the per-provider
+      // DAILY cap (see RoutineForRun.ownerRole). Orphan rows (user_id IS
+      // NULL, pre-multitenant) get null → behave like a normal user.
+      ownerRole: users.role,
     })
     .from(routines)
+    .leftJoin(users, eq(routines.userId, users.id))
     .where(eq(routines.enabled, true));
 
   // Bucket into "due now" vs "future". `lastRunAt` null means the routine
@@ -469,6 +514,7 @@ export async function runDueRoutines(
         fallbackModels: r.fallbackModels ?? [],
         maxUsdPerRun: r.maxUsdPerRun,
         tz: r.tz,
+        ownerRole: r.ownerRole ?? null,
       });
       ranRoutineIds.push(r.id);
     } catch (err) {

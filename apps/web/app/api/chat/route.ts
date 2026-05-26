@@ -16,6 +16,7 @@ import { toAiSdkTool } from '@/lib/mcp/adapters/aiSdk';
 import { scrubSecrets, sanitizeError } from '@/lib/security/scrub';
 import { meter } from '@/lib/cost/meter';
 import { addSpend, checkBudgetOrThrow } from '@/lib/cost/ledger';
+import { getProviderDailyCap } from '@/lib/cost/limits';
 import { getUserDailyUsage, addUserDailyUsage } from '@/lib/cost/userUsage';
 import { getCurrentUser } from '@/lib/auth/session';
 
@@ -789,9 +790,19 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: sanitizeError(lastError) }, { status: lastStatus });
     }
 
-    // --- Per-attempt: budget check (per-provider bucket) ----------------------
+    // --- Per-attempt: budget check (per-provider DAILY bucket) ----------------
+    // We compare today's accumulated spend for this provider against the
+    // env-driven daily cap (PROVIDER_DAILY_USD_CAP_<PROVIDER>, default $50).
+    // The earlier code passed the per-turn `usdCap` ($0.15 at medium effort)
+    // here — that's a different axis and meant ALL chats failed once daily
+    // spend crossed the per-turn budget. Admins bypass entirely.
     try {
-      await checkBudgetOrThrow(attempt.provider, 0, usdCap);
+      await checkBudgetOrThrow(
+        attempt.provider,
+        0,
+        getProviderDailyCap(attempt.provider),
+        { isAdmin: sessionUser.isAdmin },
+      );
     } catch (e) {
       lastStatus = 429;
       lastError = e;

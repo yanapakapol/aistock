@@ -84,6 +84,9 @@ export async function POST(
     fallbackModels: routine.fallbackModels,
     maxUsdPerRun: routine.maxUsdPerRun,
     tz: routine.tz,
+    // Routine load above is owner-scoped (routines.userId = me.id),
+    // so me.role IS the owner role — no extra JOIN required.
+    ownerRole: me.role,
   };
   // Fire and forget — caller polls /runs for status.
   void runRoutineOnce(forRun).catch(() => {

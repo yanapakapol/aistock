@@ -157,6 +157,8 @@ apps/web/
 | `OPENAI_API_KEY` etc. | optional | Admin-only fallback when no per-user vault row exists |
 | `TAVILY_API_KEY` | optional | News fallback; users can save their own in Settings |
 | `VAPID_*` | optional | Web push (degrades silently if missing) |
+| `PROVIDER_DAILY_USD_CAP` | optional | Global per-provider daily $ ceiling for the budget ledger (admins bypass). Default $50. Set to `0` or `disabled` to turn off. |
+| `PROVIDER_DAILY_USD_CAP_<PROVIDER>` | optional | Per-provider override of the above. e.g. `PROVIDER_DAILY_USD_CAP_MISTRAL=20`. Provider name uppercased. |
 
 ---
 

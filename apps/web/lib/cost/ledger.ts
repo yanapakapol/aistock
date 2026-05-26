@@ -43,12 +43,21 @@ export async function addSpend(provider: string, usd: number): Promise<void> {
  * Call this *before* dispatching the LLM request; on success the caller is
  * expected to follow up with `addSpend(provider, actualUsd)` once the response
  * is metered.
+ *
+ * Admin bypass: `opts.isAdmin` short-circuits the check entirely. The
+ * per-provider daily cap exists to protect the *app* from a runaway script
+ * or compromised guest account — an admin (the only role that can rotate
+ * keys, edit caps, and see audit) opts themselves out by definition.
+ *
+ * Pass `capUsd <= 0` or non-finite to disable the cap (treated as "no cap").
  */
 export async function checkBudgetOrThrow(
   provider: string,
   plannedUsd: number,
   capUsd: number,
+  opts?: { isAdmin?: boolean },
 ): Promise<void> {
+  if (opts?.isAdmin) return; // admin bypass — see fn comment.
   if (!Number.isFinite(capUsd) || capUsd <= 0) return; // cap disabled
   const spent = await getDailySpend(provider);
   if (spent + plannedUsd > capUsd) {
